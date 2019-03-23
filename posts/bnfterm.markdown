@@ -92,7 +92,7 @@ And repeat.
 
 
 ## A small language
-[Click here to read about LamE (The LAMbda Evaluater).]({{<relref "lame.markdown">}})
+[Click here to read about LamE (The LAMbda Evaluater).](posts/lame.html)
 Most of the rest of this post will be written in LamE. The syntax is a blend of Lisp and Haskell, and is hopefully mostly obvious.
 
 ## Translating to LamE
@@ -252,7 +252,7 @@ rec bnf = func (s) (
   else bnf (head xs))
 ~~~
 
-Finally, we get β-reduction!
+Finally, we get $\beta$-reduction!
 
 The program compiles into [this very long term](/bnf.txt)
 

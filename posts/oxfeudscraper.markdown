@@ -66,7 +66,7 @@ https://graph.facebook.com/v2.10/[POST_ID]?fields=reactions%2Ccomments%7Bmessage
 
 This will return a JSON object that looks like the anonymized example below.
 
-{{<highlight json>}}
+~~~ {.json}
 {
   "reactions": {
     "data": [
@@ -249,12 +249,15 @@ We can abstract this pattern of "Some things, and possibly instructions on how t
 ~~~ {.haskell}
 data Paging a = Paging {content :: [a], next :: Maybe String}
 ~~~
+
 and class,
+
 ~~~ {.haskell}
 class CanPage a where getNext :: Token -> PostID -> Paging a -> IO (Maybe (Paging a))
 ~~~
 
 First we make an instance of `FromJSON (Paging a)` whenever we have an instance of `FromJSON a`:
+
 ~~~ {.haskell}
 instance (FromJSON a) => FromJSON (Paging a) where 
   parseJSON = withObject "" $ \o-> do
@@ -403,26 +406,26 @@ main = do
 ## Database
 Now that we can get any post we want, we need some place to put them all. A MYSQL database will do. We'll use the following schema, with all the obvious foreign key constraints.
 
- Table   | Field       | Type
----------|-------------|---------
-comments |	id_comment |	bigint
-comments |	id_parent  |	bigint
-comments |	id_author  |	bigint
-comments |	message	   |text
-comments |	time	     |timestamp
-posts    |	id_post	   |bigint
-posts    |	message	   |text
-posts    |	feudnum	   |int
-posts    |	time	     |timestamp
-reactions|	type	     |varchar
-reactions|	id_author  |	bigint
-reactions|	id_post	   |bigint
-refs		 |id_src	     |bigint
-refs		 |num_dest	   |int
-tags 		 |id_comment   |	bigint
-tags 	 	 |tagged_user  |	bigint
-users	   |id_user	     |bigint
-users	   |name	       |tinytext
+Table     Field       Type
+--------- ----------- ---------
+comments 	id_comment 	bigint
+comments 	id_parent  	bigint
+comments 	id_author  	bigint
+comments 	message	    text
+comments 	time	      timestamp
+posts    	id_post	    bigint
+posts    	message	    text
+posts    	feudnum	    int
+posts    	time	      timestamp
+reactions	type	      varchar
+reactions	id_author  	bigint
+reactions	id_post	    bigint
+refs		  id_src	    bigint
+refs		  num_dest	  int
+tags 		  id_comment  bigint
+tags 	 	  tagged_user bigint
+users	    id_user	    bigint
+users	    name	      tinytext
 
 
 We're going to use the [mysql-simple](https://hackage.haskell.org/package/mysql-simple-0.4.4/docs/Database-MySQL-Simple.html) library for putting posts in the database.
@@ -441,6 +444,7 @@ insertComment cx Comment{..} = catch
     (execute cx "UPDATE comments..." ...)
     (\e' -> let err' = show (e' :: SomeException) in print err'))
 ~~~
+
 This will try inserting, and if that fails print the exception and try updating, and if *that* fails too, print the exception and exit gracefully. It works, but it's not ideal.
 
 There's a lot of code reuse inside `insertComment`, and given that we'll need something similar for inserting `Post`s, `Reaction`s, etc, we should try and pull out all the boilerplate, because fundamentally, there's not a lot of difference between putting a `Post` or a `Comment` into the database, the only thing that really changes is what table it goes in, and what query you use.
@@ -592,13 +596,13 @@ main = do
       postids = lines postids'
   posts <- runFB (sequence $ map makePostFromFB postids) token
   sequence_ $ map (putPost ci) posts 
-{{</highlight >}}
+~~~
 
 We can also relax the type signature of, and slightly modify the function `pagingFromFB` to 
 
 ~~~ {.haskell}
 jsonFromFB :: (FromJSON c) => PageID -> FB c
-{{</highlight >}}
+~~~
 
 (where `PageID` is just a synonym for `String`) so that it uses the query string above, and hence returns a `FB (Paging PostResponse)`.
 

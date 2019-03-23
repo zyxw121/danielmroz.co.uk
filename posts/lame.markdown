@@ -708,6 +708,7 @@ And we are done!
 The interpreter was inspired by Mike Spivey's Principles of Programming Languages lecture notes.
 
 Here are some resources I found useful:
+
 *  http://matt.might.net/articles/compiling-up-to-lambda-calculus/
 *  http://okmij.org/ftp/Computation/lambda-calc.html#neg
 *  http://jwodder.freeshell.org/lambda.html

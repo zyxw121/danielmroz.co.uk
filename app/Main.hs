@@ -43,7 +43,7 @@ wOpts = def {
   writerHighlightStyle = Just kate,
   writerHTMLMathMethod = MathJax "https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.5/MathJax.js"}
 
-myExts e = foldr enableExtension e [Ext_fenced_code_blocks, Ext_fenced_code_attributes, Ext_yaml_metadata_block, Ext_tex_math_dollars]
+myExts e = foldr enableExtension e [Ext_fenced_code_blocks, Ext_fenced_code_attributes, Ext_yaml_metadata_block, Ext_tex_math_dollars, Ext_simple_tables]
 
 postCom :: Monad m => Post (m a) -> m (Post a)
 postCom (Post{..}) = postBody >>= (\x -> let postBody = x in return Post{..}) 
