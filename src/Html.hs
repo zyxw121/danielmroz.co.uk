@@ -77,7 +77,7 @@ index intro content = html $ do
             content
         H.div ! class_ "footer" $ do 
           p $ preEscapedToHtml $ ("Copyright &copy; 2019 Daniel Mroz" :: String)
-          p $ "Last modified: July 18, 2019"
+          p $ "Last modified: December 15, 2019"
 
 
 makeIndex :: [Post a] -> H.Html
