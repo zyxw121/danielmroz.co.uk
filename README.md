@@ -1,1 +1,1 @@
-[My webiste](http://danielmroz.co.uk)
+[My website](http://danielmroz.co.uk)
