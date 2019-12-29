@@ -73,7 +73,8 @@ filterMaybes (Nothing : xs) = filterMaybes xs
 
 main :: IO ()
 main = do
-  names <- listDirectory "posts/"
+  nnames <- listDirectory "notes/"
+  names <- listDirectory "posts/" --keep the .pdf extension
   let names' = filter (\x -> dropWhile (/= '.') x == ".markdown") $ names
   files <- sequence . map (readFile . ("posts/"++)) $ names
   let names'' = map stripMd names'

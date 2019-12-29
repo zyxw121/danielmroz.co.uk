@@ -12,6 +12,12 @@ data Post a = Post {
   postBody :: a}
   deriving (Show)
 
+data Note = Note {
+  noteTitle :: String,
+  notePath :: String }
+  deriving (Show)
+
+
 instance Functor Post where
   fmap f p = p {postBody = f $ postBody p}
 

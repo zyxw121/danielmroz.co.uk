@@ -51,10 +51,17 @@ posts :: [Post a] -> H.Html
 posts ps = do
   h2 $ "Posts"
   ul $ do
-    mapM_ makeListItem  ps 
+    mapM_ makePostItem ps 
 
-makeIndex :: [Post a] -> H.Html
-makeIndex ps = html $ do
+notes :: [Note] -> H.Html
+notes ns = do
+  h2 $ "Notes"
+  p $ "Short notes I've written up on various subjects."
+  ul $ do
+    mapM_ makeNoteItem ns
+
+index :: H.Html -> H.Html -> H.Html
+index intro content = html $ do
   H.head $ do
     H.title $ "Daniel Mroz" 
     link ! href "css/main.css" ! rel "stylesheet" ! type_ "text/css"
@@ -67,17 +74,29 @@ makeIndex ps = html $ do
           H.div ! class_ "center" $ do
             intro
           H.div ! class_ "inside" $ do
-            about
-            posts ps
-            --h2 $ "Status"
-            --p $ "I am currently working on my dissertation, on the cateorical semantics of Homotopy Type Theory"
-            --p $ "Next year I will be studying for a PhD at Manchester"
+            content
         H.div ! class_ "footer" $ do 
           p $ preEscapedToHtml $ ("Copyright &copy; 2019 Daniel Mroz" :: String)
           p $ "Last modified: July 18, 2019"
- 
-makeListItem :: Post a -> H.Html
-makeListItem Post{..} = html $ li $ do
+
+
+makeIndex :: [Post a] -> H.Html
+makeIndex ps = index intro content where
+  content = do
+    about
+    notes ns 
+    posts ps
+
+ns = [Note {notePath = "yoneda.pdf", noteTitle = "Yoneda Lemma"},
+      Note {notePath = "ultrafilters.pdf", noteTitle = "Ultrafilters"}]
+
+
+makePostItem :: Post a -> H.Html
+makePostItem Post{..} = html $ li $ do
   a ! href (stringValue ("posts/" ++ postName ++ ".html" )) $ h4 $ toHtml postTitle
   preEscapedToHtml ("&mdash;" :: String)
   p $ toHtml postDescription
+
+makeNoteItem :: Note -> H.Html
+makeNoteItem Note{..} = html $ li $ do
+  a ! href (stringValue ("notes/" ++ notePath )) $ h4 $ toHtml noteTitle
