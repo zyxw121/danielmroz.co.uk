@@ -7,11 +7,13 @@ import Text.Pandoc
 import Skylighting
 import Text.Pandoc.Readers.Markdown
 import Text.Pandoc.Writers.HTML
+import Text.Pandoc.Highlighting
 import Data.Text (Text, pack, unpack)
 import qualified Text.Blaze.Html5 as H
 import Text.Blaze.Html5.Attributes as A 
 import Text.Blaze.Html.Renderer.String
 import System.Directory
+import System.FilePath.Posix
 
 fromJust :: Maybe a -> a
 fromJust (Just a) = a
@@ -54,8 +56,12 @@ postToHtml = postCom . fmap (writeHtml4 wOpts)
 (>=>) :: Monad m => (a -> m b) -> (b -> m c) -> a -> m c
 f >=> g = \x -> f x >>= g 
 
-stripMd :: String -> String
-stripMd = takeWhile (/= '.')
+
+publishHighlight :: Style -> IO ()
+publishHighlight s = do
+  let css = styleToCss s
+  writeFile ("public/css/highlight.css") css
+
 
 publishPost :: (String, Either PandocError (Post H.Html)) -> IO (Maybe (Post ())) 
 publishPost (name, Left e) = do 
@@ -63,7 +69,7 @@ publishPost (name, Left e) = do
   print e
   return Nothing
 publishPost (name, Right p) = do
-  writeFile ("public/posts/" ++ name ++ ".html") (renderHtml . postToPage $ p)
+  writeFile ("public/posts" </> name <.> "html") (renderHtml . postToPage $ p)
   return . Just $ fmap (const ()) p
   
 filterMaybes :: [Maybe a] -> [a]
@@ -73,15 +79,14 @@ filterMaybes (Nothing : xs) = filterMaybes xs
 
 main :: IO ()
 main = do
-  nnames <- listDirectory "notes/"
-  names <- listDirectory "posts/" --keep the .pdf extension
-  let names' = filter (\x -> dropWhile (/= '.') x == ".markdown") $ names
-  files <- sequence . map (readFile . ("posts/"++)) $ names
-  let names'' = map stripMd names'
-      posts = map (runPure . (makePost >=> postToHtml)) $ zip names'' files
-  published <- sequence . map publishPost $ zip names'' posts
+  postpaths <- listDirectory "posts/" 
+  let postnames = map (dropExtension . takeBaseName) postpaths
+  files <- sequence . map (readFile . ("posts/" </>)) $ postpaths
+  let posts = map (runPure . (makePost >=> postToHtml)) $ zip postnames files
+  published <- sequence . map publishPost $ zip postnames posts
   let published' = filterMaybes published
       index = makeIndex published'
-  writeFile "public/index.html" (renderHtml index)    
+  writeFile "public/index.html" (renderHtml index)
+  publishHighlight kate
 
 

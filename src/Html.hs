@@ -8,12 +8,12 @@ import Text.Blaze.Html5.Attributes as A
 type Template a = a -> H.Html
 
 
-
 postToPage :: Post H.Html -> H.Html
 postToPage  (Post {..}) = html $ do
   H.head $ do
     H.title $ toHtml $ "Daniel Mroz | " ++ postTitle
     link ! href "../css/main.css" ! rel "stylesheet" ! type_ "text/css"
+    link ! href "../css/highlight.css" ! rel "stylesheet" ! type_ "text/css"
     link ! href "https://fonts.googleapis.com/css?family=Kanit|Lora|Seymour+One|Modak" ! rel "stylesheet"
     script ! src "https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.5/MathJax.js?config=TeX-MML-AM_CHTML" ! type_ "text/javascript" ! async "async" $ mempty  
   body $ do 
