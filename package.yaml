@@ -61,6 +61,9 @@ executables:
     - blaze-html
     - directory
     - filepath
+    - aeson
+    - bytestring
+    - aeson-pretty
 
 
 tests:
