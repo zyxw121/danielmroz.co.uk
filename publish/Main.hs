@@ -57,7 +57,6 @@ main = do
               putStr $ "Note already exists with title: " ++ noteTitle n ++ "\n" 
               putStr $ "Updating...\n"
             Nothing -> do
-
               putStr "Title? \n"
               s <- getLine
               B.writeFile (home </> webpath </> "config.json") . P.encodePretty $ addNote path s config
