@@ -23,6 +23,7 @@ library:
   source-dirs: src
   dependencies: 
   - blaze-html
+  - aeson
 
 executables:
   website:
@@ -41,6 +42,26 @@ executables:
     - blaze-html
     - directory
     - filepath
+    - aeson
+    - bytestring
+
+  publish:
+    main: Main.hs
+    source-dirs: publish
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - danielmroz-co-uk
+    - pandoc
+    - skylighting
+    - pandoc-types
+    - text
+    - blaze-html
+    - directory
+    - filepath
+
 
 tests:
   danielmroz-co-uk-test:

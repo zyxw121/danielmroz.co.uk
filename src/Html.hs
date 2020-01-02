@@ -30,22 +30,6 @@ postToPage  (Post {..}) = html $ do
               a ! href "http://danielmroz.co.uk" $  "Click here to go back."
         H.div ! class_ "footer" $ 
           p $ preEscapedToHtml $ ("Copyright &copy; 2019 Daniel Mroz" :: String)
-         
-intro :: H.Html
-intro = do 
-  h1 $ "Daniel Mroz"
-  h4 $ "Computer Science PhD student, Manchester University"
-  h4 $ "Research Interests: Functional programming, logic, category theory"
-  h4 $ do 
-    a ! href "Daniel_Mroz_CV.pdf" $ "CV"
-    " ~ "
-    a ! href "http://github.com/zyxw121" $ "Github"
-  h4 $ "Email: me (at) danielmroz.co.uk"  
-
-about :: H.Html
-about = do
-  h2 $ "About"
-  p $ "After studying Maths and Computer Science at Oxford, I'm now a PhD student at Manchester. I'm a big fan of functional programming, especially in Haskell, because it makes it possible to write very high-level, elegant and understandable programs, and easily reason about the correctness of programs."
 
 posts :: [Post a] -> H.Html
 posts ps = do
@@ -53,8 +37,8 @@ posts ps = do
   ul $ do
     mapM_ makePostItem ps 
 
-notes :: [Note] -> H.Html
-notes ns = do
+notes' :: [Note] -> H.Html
+notes' ns = do
   h2 $ "Notes"
   p $ "Short notes I've written up on various subjects."
   ul $ do
@@ -80,15 +64,12 @@ index intro content = html $ do
           p $ "Last modified: December 15, 2019"
 
 
-makeIndex :: [Post a] -> H.Html
-makeIndex ps = index intro content where
+makeIndex :: [Post a] -> Config H.Html -> H.Html
+makeIndex ps Config{..}= index intro content where
   content = do
     about
-    notes ns 
+    notes' notes 
     posts ps
-
-ns = [Note {notePath = "yoneda.pdf", noteTitle = "Yoneda Lemma"},
-      Note {notePath = "ultrafilters.pdf", noteTitle = "Ultrafilters"}]
 
 
 makePostItem :: Post a -> H.Html
