@@ -96,7 +96,7 @@ publishPost (name, Left e) = do
   return Nothing
 publishPost (name, Right p) = do
   writeFile ("public/posts" </> name <.> "html") (renderHtml . postToPage $ p)
-  putStr $ "Post " ++ name ++ " published"
+  putStr $ "Post " ++ name ++ " published\n"
   return . Just $ fmap (const ()) p
   
 filterMaybes :: [Maybe a] -> [a]

@@ -7,7 +7,6 @@ import Text.Blaze.Html5.Attributes as A
 
 type Template a = a -> H.Html
 
-
 postToPage :: Post H.Html -> H.Html
 postToPage  (Post {..}) = html $ do
   H.head $ do
@@ -29,7 +28,7 @@ postToPage  (Post {..}) = html $ do
             H.div ! class_ "footer" $ 
               a ! href "http://danielmroz.co.uk" $  "Click here to go back."
         H.div ! class_ "footer" $ 
-          p $ preEscapedToHtml $ ("Copyright &copy; 2019 Daniel Mroz" :: String)
+          p $ preEscapedToHtml $ ("Copyright &copy; 2020 Daniel Mroz" :: String)
 
 posts :: [Post a] -> H.Html
 posts ps = do
@@ -60,17 +59,17 @@ index intro content = html $ do
           H.div ! class_ "inside" $ do
             content
         H.div ! class_ "footer" $ do 
-          p $ preEscapedToHtml $ ("Copyright &copy; 2019 Daniel Mroz" :: String)
-          p $ "Last modified: December 15, 2019"
+          p $ preEscapedToHtml $ ("Copyright &copy; 2020 Daniel Mroz" :: String)
+          p $ "Last modified: January 2, 2020"
 
 
 makeIndex :: [Post a] -> Config H.Html -> H.Html
 makeIndex ps Config{..}= index intro content where
   content = do
+    img ! src "me.JPG" ! class_ "me box" 
     about
     notes' notes 
     posts ps
-
 
 makePostItem :: Post a -> H.Html
 makePostItem Post{..} = html $ li $ do

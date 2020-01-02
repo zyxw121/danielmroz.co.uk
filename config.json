@@ -1,6 +1,6 @@
 {
   "intro": "# Daniel Mroz #
-#### Computer Science PhD student, Manchester University 
+#### Computer Science PhD student, University of Manchester 
 
 #### Research Interests: Logic, category theory, functional programming 
 
@@ -10,7 +10,8 @@
   ", 
   "about": "## About
   
-After studying Maths and Computer Science at Oxford, I'm now a PhD student at Manchester. I'm a big fan of functional programming, especially in Haskell, because it makes it possible to write very high-level, elegant and understandable programs, and easily reason about the correctness of programs.",
+After studying Maths and Computer Science at Oxford, I'm now a PhD student at Manchester. I'm a big fan of functional programming, especially in Haskell, because it makes it possible to write very high-level, elegant and understandable programs, and easily reason about the correctness of programs.
+",
   "notes": [
     {
       "noteTitle" : "Ultrafilters",
