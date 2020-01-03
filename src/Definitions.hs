@@ -25,14 +25,14 @@ instance Functor Post where
 data Config a = Config {
   intro :: a,
   about :: a,
-  notes :: [Note]
+  notes :: [Note],
+  hstyle :: Maybe String
 }
   deriving (Show, Generic)
 
 instance Functor Config where
   fmap f c = c{intro = f $ intro c, about = f $ about c}
 
-c = Config {intro = "intro", about = "about", notes = [Note{noteTitle="a", notePath = "b"}]}
 instance FromJSON Note
 instance ToJSON Note
 instance (FromJSON a) => FromJSON (Config a)

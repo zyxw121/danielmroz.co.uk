@@ -1,5 +1,6 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE LambdaCase #-}
 module Main where
 import Html
 import Definitions
@@ -16,6 +17,7 @@ import System.Directory
 import System.FilePath.Posix
 import Data.Aeson
 import qualified Data.ByteString.Lazy as B
+import System.IO.Error
 
 fromJust :: Maybe a -> a
 fromJust (Just a) = a
@@ -70,6 +72,15 @@ configCom (Config{..}) = do
       about = a
   return Config{..}
 
+styleFromFile :: String -> IO (Maybe Style)
+styleFromFile path = catchIOError 
+  (do
+    json <- B.readFile path
+    case (eitherDecode json :: Either String Style) of
+      Left e -> putStr e >> (ioError $ userError "Failed to parse style" )
+      Right s -> putStr ("Parsed style " ++ path) >> return (Just s)) 
+  (\e -> print e >> return Nothing)
+
 
 postToHtml :: PandocMonad m => Post Pandoc -> m (Post H.Html)
 postToHtml = postCom . fmap (writeHtml4 wOpts)
@@ -79,7 +90,6 @@ configToHtml = runPure . (makeConfig >=> configToHtml')
 
 configToHtml' :: PandocMonad m => Config Pandoc -> m (Config H.Html)
 configToHtml'  = configCom . fmap (writeHtml4 wOpts) 
-
 
 (>=>) :: Monad m => (a -> m b) -> (b -> m c) -> a -> m c
 f >=> g = \x -> f x >>= g 
@@ -104,6 +114,34 @@ filterMaybes [] = []
 filterMaybes ((Just x):xs) = x : filterMaybes xs
 filterMaybes (Nothing : xs) = filterMaybes xs
 
+fromMaybe :: Maybe a -> a -> a
+fromMaybe (Just x) _ = x
+fromMaybe Nothing y = y
+
+predefStyles = 
+ ["pygments",
+  "espresso",
+  "zenburn",
+  "monochrome",
+  "breezeDark",
+  "haddock",
+  "kate"]
+
+toStyle :: String ->  Style
+toStyle "pygments" = pygments
+toStyle "espresso" = espresso
+toStyle "zenburn" = zenburn
+toStyle "monochrome" = monochrome
+toStyle "breezeDark" = breezeDark
+toStyle "haddock" = haddock
+toStyle "kate" = kate
+
+makeStyle :: Maybe String -> IO Style
+makeStyle Nothing = return kate
+makeStyle (Just name) = if name `elem` predefStyles then return $ toStyle name else styleFromFile name >>= \case 
+  Just s -> return s
+  Nothing -> return kate
+
 
 doPost :: String -> IO (Maybe (Post ()))
 doPost path = do
@@ -113,7 +151,7 @@ doPost path = do
   publishPost (name, post)
 
 main :: IO ()
-main = do
+main = do 
   json <- B.readFile "config.json" 
   case (eitherDecode json :: Either String (Config String)) of
     Left e -> putStr ("Error reading config: \n" ++ e) >> return ()
@@ -126,6 +164,7 @@ main = do
           -- :: [Post ()], all posts that have been published successfully 
           let index = makeIndex posts config'
           writeFile "public/index.html" (renderHtml index)
-          publishHighlight kate
+          s <- makeStyle (hstyle config') 
+          publishHighlight s 
 
 
