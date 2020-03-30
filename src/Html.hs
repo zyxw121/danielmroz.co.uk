@@ -4,6 +4,7 @@ module Html where
 import Definitions
 import Text.Blaze.Html5 as H
 import Text.Blaze.Html5.Attributes as A 
+import Data.DateTime
 
 type Template a = a -> H.Html
 
@@ -43,8 +44,8 @@ notes' ns = do
   ul $ do
     mapM_ makeNoteItem ns
 
-index :: H.Html -> H.Html -> H.Html
-index intro content = html $ do
+index :: H.Html -> H.Html -> H.Html -> H.Html
+index intro content footer = html $ do
   H.head $ do
     H.title $ "Daniel Mroz" 
     link ! href "css/main.css" ! rel "stylesheet" ! type_ "text/css"
@@ -59,17 +60,23 @@ index intro content = html $ do
           H.div ! class_ "inside" $ do
             content
         H.div ! class_ "footer" $ do 
+          footer
+
+makefoot :: DateTime -> H.Html
+makefoot today = do
           p $ preEscapedToHtml $ ("Copyright &copy; 2020 Daniel Mroz" :: String)
           p $ "Last modified: January 2, 2020"
 
 
-makeIndex :: [Post a] -> Config H.Html -> H.Html
-makeIndex ps Config{..}= index intro content where
+makeIndex :: DateTime -> [Post a] -> Config H.Html -> H.Html
+makeIndex today ps Config{..}= index intro content where
   content = do
     img ! src "me.JPG" ! class_ "me box" 
     about
     notes' notes 
     posts ps
+  footer = makefoot today
+    
 
 makePostItem :: Post a -> H.Html
 makePostItem Post{..} = html $ li $ do

@@ -3,3 +3,4 @@ danielmroz-co-uk.cabal
 *~
 public/*
 *.swp
+*.DS_Store
