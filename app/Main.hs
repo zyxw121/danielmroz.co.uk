@@ -18,6 +18,7 @@ import System.FilePath.Posix
 import Data.Aeson
 import qualified Data.ByteString.Lazy as B
 import System.IO.Error
+import qualified Data.DateTime as D
 
 fromJust :: Maybe a -> a
 fromJust (Just a) = a
@@ -162,7 +163,8 @@ main = do
           postpaths <- listDirectory "posts/" 
           posts <- fmap filterMaybes . sequence . map doPost $ postpaths 
           -- :: [Post ()], all posts that have been published successfully 
-          let index = makeIndex posts config'
+          today <- D.getCurrentTime
+          let index = makeIndex today posts config'
           writeFile "public/index.html" (renderHtml index)
           s <- makeStyle (hstyle config') 
           publishHighlight s 

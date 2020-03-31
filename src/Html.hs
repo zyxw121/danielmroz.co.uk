@@ -64,12 +64,12 @@ index intro content footer = html $ do
 
 makefoot :: DateTime -> H.Html
 makefoot today = do
-          p $ preEscapedToHtml $ ("Copyright &copy; 2020 Daniel Mroz" :: String)
-          p $ "Last modified: January 2, 2020"
+          p $ preEscapedToHtml $ ("Copyright &copy; " ++ formatDateTime "%Y" today ++ " Daniel Mroz" :: String)
+          p $ preEscapedToHtml $ ("Last modified: " ++ formatDateTime "%B %e, %Y" today) --January 2, 2020"
 
 
 makeIndex :: DateTime -> [Post a] -> Config H.Html -> H.Html
-makeIndex today ps Config{..}= index intro content where
+makeIndex today ps Config{..}= index intro content footer where
   content = do
     img ! src "me.JPG" ! class_ "me box" 
     about

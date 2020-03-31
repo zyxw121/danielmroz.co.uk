@@ -45,6 +45,7 @@ executables:
     - filepath
     - aeson
     - bytestring
+    - datetime
 
   publish:
     main: Main.hs
