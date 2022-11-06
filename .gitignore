@@ -1,6 +1,6 @@
 .stack-work/
 danielmroz-co-uk.cabal
 *~
-public/*
+html/*
 *.swp
 *.DS_Store

@@ -4,12 +4,12 @@ module Html where
 import Definitions
 import Text.Blaze.Html5 as H
 import Text.Blaze.Html5.Attributes as A 
-import Data.DateTime
+import Data.Time
 
 type Template a = a -> H.Html
 
-postToPage :: Post H.Html -> H.Html
-postToPage  (Post {..}) = html $ do
+postToPage :: UTCTime -> Post H.Html -> H.Html
+postToPage  today (Post {..}) = html $ do
   H.head $ do
     H.title $ toHtml $ "Daniel Mroz | " ++ postTitle
     link ! href "../css/main.css" ! rel "stylesheet" ! type_ "text/css"
@@ -29,7 +29,7 @@ postToPage  (Post {..}) = html $ do
             H.div ! class_ "footer" $ 
               a ! href "http://danielmroz.co.uk" $  "Click here to go back."
         H.div ! class_ "footer" $ 
-          p $ preEscapedToHtml $ ("Copyright &copy; 2020 Daniel Mroz" :: String)
+          p $ preEscapedToHtml $ ("Copyright &copy; " ++ formatTime defaultTimeLocale "%Y" today ++ " Daniel Mroz" :: String)
 
 posts :: [Post a] -> H.Html
 posts ps = do
@@ -62,16 +62,16 @@ index intro content footer = html $ do
         H.div ! class_ "footer" $ do 
           footer
 
-makefoot :: DateTime -> H.Html
+makefoot :: UTCTime -> H.Html
 makefoot today = do
-          p $ preEscapedToHtml $ ("Copyright &copy; " ++ formatDateTime "%Y" today ++ " Daniel Mroz" :: String)
-          p $ preEscapedToHtml $ ("Last modified: " ++ formatDateTime "%B %e, %Y" today) --January 2, 2020"
+          p $ preEscapedToHtml $ ("Copyright &copy; " ++ formatTime defaultTimeLocale "%Y" today ++ " Daniel Mroz" :: String)
+          p $ preEscapedToHtml $ ("Last modified: " ++ formatTime defaultTimeLocale "%B %e, %Y" today) --January 2, 2020"
 
 
-makeIndex :: DateTime -> [Post a] -> Config H.Html -> H.Html
+makeIndex :: UTCTime -> [Post a] -> Config H.Html -> H.Html
 makeIndex today ps Config{..}= index intro content footer where
   content = do
-    img ! src "me.JPG" ! class_ "me box" 
+    img ! src "images/me.JPG" ! class_ "me box" 
     about
     notes' notes 
     posts ps
@@ -80,7 +80,9 @@ makeIndex today ps Config{..}= index intro content footer where
 
 makePostItem :: Post a -> H.Html
 makePostItem Post{..} = html $ li $ do
-  a ! href (stringValue ("posts/" ++ postName ++ ".html" )) $ h4 $ toHtml postTitle
+  a ! href (stringValue ("posts/" ++ postName ++ ".html" )) $ h4 $ do
+    toHtml postTitle 
+    toHtml (" (" ++ formatTime defaultTimeLocale "%Y" postDate ++ ")")
   preEscapedToHtml ("&mdash;" :: String)
   p $ toHtml postDescription
 

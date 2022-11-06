@@ -1,0 +1,173 @@
+<html><head><title>Daniel Mroz | A lambda-term that finds beta-normal forms</title><link href="../css/main.css" rel="stylesheet" type="text/css"><link href="../css/highlight.css" rel="stylesheet" type="text/css"><link href="https://fonts.googleapis.com/css?family=Kanit|Lora|Seymour+One|Modak" rel="stylesheet"><script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.5/MathJax.js?config=TeX-MML-AM_CHTML" type="text/javascript" async="async"></script></head><body><div class="container"><div class="mainbar"><div class="maincontainer container"><div class="main box"><div class="center"><h1>A lambda-term that finds beta-normal forms</h1></div><div class="inside"><hr><p>The untyped lambda calclus is Turing Complete, in the sense that every program can be defined by a <span class="math inline">\(\lambda\)</span>-term. Furthermore, there is an algorithm that finds the <span class="math inline">\(\beta\)</span>-normal form of a <span class="math inline">\(\lambda\)</span>-term (if it has one): repeated left-most reduction.</p>
+<p>So, let's try to find the term that defines that algorithm!</p>
+<p>The strategy is:</p>
+<ol>
+<li>Write a program to find <span class="math inline">\(\beta\)</span>-normal forms in Haskell</li>
+<li>Translate this into a small toy language</li>
+<li>Write a compiler (in Haskell) from said language into λ-terms</li>
+</ol>
+<h2>Finding <span class="math inline">\(\beta\)</span>-normal forms in Haskell</h2>
+<p>We start by defining our types.</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="kw">newtype</span> <span class="dt">Name</span> <span class="ot">=</span> <span class="dt">Name</span> <span class="dt">String</span> <span class="kw">deriving</span> (<span class="dt">Eq</span>)</span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Term</span> <span class="ot">=</span> <span class="dt">Var</span> <span class="dt">Name</span> <span class="op">|</span> <span class="dt">Abs</span> <span class="dt">Name</span> <span class="dt">Term</span> <span class="op">|</span> <span class="dt">App</span> <span class="dt">Term</span> <span class="dt">Term</span> </span></code></pre></div>
+<p>We have some choice of how to handle variables. It is important that we are able to generate a "fresh" variable from any finite collection - this will be needed when we implement substitution. This would be easily done if we used integers to name variables ("one plus the biggest one"), but it is not so hard to do with strings (as we will see below), and string variables are nice to use.</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="ot">gen ::</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> [<span class="dt">Name</span>]</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>gen <span class="dv">0</span> <span class="ot">=</span>[<span class="dt">Name</span> <span class="st">&quot;a&quot;</span>]</span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>gen <span class="dv">1</span> <span class="ot">=</span> <span class="fu">map</span> (<span class="dt">Name</span> <span class="op">.</span> (<span class="op">:</span>[])) [<span class="ch">&#39;a&#39;</span><span class="op">..</span><span class="ch">&#39;z&#39;</span>]</span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>gen n <span class="ot">=</span> <span class="kw">let</span> ns <span class="ot">=</span> gen (n<span class="op">-</span><span class="dv">1</span>) <span class="kw">in</span> [<span class="dt">Name</span> (s<span class="op">:</span>ss) <span class="op">|</span> s <span class="ot">&lt;-</span> [<span class="ch">&#39;a&#39;</span><span class="op">..</span><span class="ch">&#39;z&#39;</span>], (<span class="dt">Name</span> ss) <span class="ot">&lt;-</span> ns]</span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a><span class="ot">fresh ::</span> [<span class="dt">Name</span>] <span class="ot">-&gt;</span> <span class="dt">Name</span></span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a>fresh ns <span class="ot">=</span></span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> n <span class="ot">=</span> <span class="fu">length</span> ns</span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a>      k <span class="ot">=</span> <span class="fu">length</span> <span class="op">$</span> <span class="fu">takeWhile</span> (<span class="op">&lt;=</span>n) <span class="op">$</span> <span class="fu">iterate</span> (<span class="op">*</span><span class="dv">26</span>) <span class="dv">1</span> </span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a>      ps <span class="ot">=</span> <span class="fu">take</span> (n<span class="op">+</span><span class="dv">1</span>) <span class="op">$</span> gen k <span class="kw">in</span> </span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a>        <span class="fu">head</span> <span class="op">$</span> <span class="fu">filter</span> (<span class="fu">not</span> <span class="op">.</span> (<span class="fu">flip</span> <span class="fu">elem</span>) ns) ps </span></code></pre></div>
+<p>The expression <code>gen n</code> returns the list of all variables consisting of lowercase letters of length <code>n</code>. Crucially they are all distinct. We use it in <code>frees ns</code> to get a list of <code>(length ns)+1</code> distinct names so that we can find one which is not in <code>ns</code>.</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="ot">frees ::</span> <span class="dt">Term</span> <span class="ot">-&gt;</span> [<span class="dt">Name</span>]</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>frees (<span class="dt">Var</span> n) <span class="ot">=</span> [n]</span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>frees (<span class="dt">App</span> s t) <span class="ot">=</span> frees s <span class="op">++</span> frees t</span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>frees (<span class="dt">Abs</span> x s) <span class="ot">=</span> <span class="fu">filter</span> (<span class="op">/=</span>x) <span class="op">$</span> frees s        </span></code></pre></div>
+<p>The function <code>frees</code> is used to find the free variables in a term. Our approach here is certainly naive. Why not put the free variables in a <code>Set</code>, or at least an ordered list? As it turns out, the overhead induced by more efficient data structures actually makes <code>frees</code> noticably slower for reasonably sized inputs.</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a>sub (<span class="dt">Var</span> y) t x  <span class="ot">=</span> <span class="kw">if</span> x<span class="op">==</span>y <span class="kw">then</span> t <span class="kw">else</span> (<span class="dt">Var</span> y)</span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>sub (<span class="dt">App</span> u v) t x  <span class="ot">=</span> <span class="dt">App</span> (sub u t x) (sub v t x)</span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>sub (<span class="dt">Abs</span> y s) t x <span class="ot">=</span> <span class="kw">let</span> ts <span class="ot">=</span> frees t <span class="kw">in</span></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a>  <span class="kw">if</span> y<span class="op">==</span>x <span class="op">||</span> y <span class="ot">`elem`</span> ts <span class="kw">then</span> <span class="kw">let</span> z <span class="ot">=</span> fresh (ts <span class="op">++</span> frees s <span class="op">++</span> [x]) <span class="kw">in</span> <span class="dt">Abs</span> z <span class="op">$</span> sub (sub s (<span class="dt">Var</span> z) y) t x </span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a>  <span class="kw">else</span> <span class="dt">Abs</span> y (sub s t x)</span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a><span class="ot">bred ::</span> <span class="dt">Term</span> <span class="ot">-&gt;</span> <span class="dt">Maybe</span> <span class="dt">Term</span></span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a>bred (<span class="dt">App</span> (<span class="dt">Abs</span> x s) v) <span class="ot">=</span>  <span class="dt">Just</span> <span class="op">$</span> sub s v x</span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a>bred _ <span class="ot">=</span> <span class="dt">Nothing</span></span></code></pre></div>
+<p>Substitution and β-reduction are now straightforward.</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="ot">lred ::</span> <span class="dt">Term</span> <span class="ot">-&gt;</span> <span class="dt">Maybe</span> <span class="dt">Term</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>lred (<span class="dt">Var</span> x) <span class="ot">=</span> <span class="dt">Nothing</span></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>lred u<span class="op">@</span>(<span class="dt">App</span> s t) <span class="ot">=</span> bred u</span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a>  <span class="op">&lt;|&gt;</span> <span class="kw">do</span></span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a>    x <span class="ot">&lt;-</span> lred s </span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a>    <span class="fu">return</span> <span class="op">$</span> <span class="dt">App</span> x t</span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a>  <span class="op">&lt;|&gt;</span> <span class="kw">do</span></span>
+<span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a>    x <span class="ot">&lt;-</span> lred t</span>
+<span id="cb5-9"><a href="#cb5-9" aria-hidden="true" tabindex="-1"></a>    <span class="fu">return</span> <span class="op">$</span> <span class="dt">App</span> s x </span>
+<span id="cb5-10"><a href="#cb5-10" aria-hidden="true" tabindex="-1"></a>lred (<span class="dt">Abs</span> x s) <span class="ot">=</span> lred s <span class="op">&gt;&gt;=</span> <span class="dt">Just</span> <span class="op">.</span> <span class="dt">Abs</span> x</span></code></pre></div>
+<p>We can use the <code>Alternative</code> instance of <code>Maybe</code> to cleanly implement left-most reduction.</p>
+<div class="sourceCode" id="cb6"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="ot">bnf ::</span> <span class="dt">Term</span> <span class="ot">-&gt;</span> <span class="dt">Term</span></span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>bnf t <span class="ot">=</span> <span class="kw">case</span> lred t <span class="kw">of</span></span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">Just</span> t&#39; <span class="ot">-&gt;</span> bnf t&#39;</span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">Nothing</span> <span class="ot">-&gt;</span> t </span></code></pre></div>
+<p>And repeat.</p>
+<h2>A small language</h2>
+<p><a href="posts/lame.html">Click here to read about LamE (The LAMbda Evaluater).</a> Most of the rest of this post will be written in LamE. The syntax is a blend of Lisp and Haskell, and is hopefully mostly obvious.</p>
+<h2>Translating to LamE</h2>
+<p>LamE doesn't have all the high-level features of Haskell. So we'll have to get our hands dirty and implement them ourselves.</p>
+<p>Let's start by defining some functions about lists: <code>append</code>, <code>filter</code>, <code>map</code>, <code>concat</code>, <code>length</code>, <code>iterate</code>, <code>take</code>, <code>takeWhile</code>, and <code>elem</code> are what we'll need.</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a>rec append <span class="ot">=</span> func (x y) (</span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a>  <span class="kw">if</span> empty x </span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a>  <span class="kw">then</span> y </span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a>  <span class="kw">else</span> cons (<span class="fu">head</span> x) (append (<span class="fu">tail</span> x) y));</span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a>rec <span class="fu">filter</span> <span class="ot">=</span> func (p xs) (</span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a>  <span class="kw">if</span> empty xs</span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true" tabindex="-1"></a>  <span class="kw">then</span> xs</span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true" tabindex="-1"></a>  <span class="kw">else</span> (<span class="kw">if</span> p (<span class="fu">head</span> xs) </span>
+<span id="cb7-10"><a href="#cb7-10" aria-hidden="true" tabindex="-1"></a>    <span class="kw">then</span> cons (<span class="fu">head</span> xs) (<span class="fu">filter</span> p (<span class="fu">tail</span> xs)) </span>
+<span id="cb7-11"><a href="#cb7-11" aria-hidden="true" tabindex="-1"></a>    <span class="kw">else</span> <span class="fu">filter</span> p (<span class="fu">tail</span> xs)));</span>
+<span id="cb7-12"><a href="#cb7-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-13"><a href="#cb7-13" aria-hidden="true" tabindex="-1"></a>rec <span class="fu">map</span> <span class="ot">=</span> func (f xs) (</span>
+<span id="cb7-14"><a href="#cb7-14" aria-hidden="true" tabindex="-1"></a>  <span class="kw">if</span> empty xs </span>
+<span id="cb7-15"><a href="#cb7-15" aria-hidden="true" tabindex="-1"></a>  <span class="kw">then</span> xs</span>
+<span id="cb7-16"><a href="#cb7-16" aria-hidden="true" tabindex="-1"></a>  <span class="kw">else</span> cons (f (<span class="fu">head</span> xs)) (<span class="fu">map</span> f (<span class="fu">tail</span> xs)) );</span>
+<span id="cb7-17"><a href="#cb7-17" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-18"><a href="#cb7-18" aria-hidden="true" tabindex="-1"></a>rec <span class="fu">concat</span> <span class="ot">=</span> func (xss) (</span>
+<span id="cb7-19"><a href="#cb7-19" aria-hidden="true" tabindex="-1"></a>  <span class="kw">if</span> empty xss </span>
+<span id="cb7-20"><a href="#cb7-20" aria-hidden="true" tabindex="-1"></a>  <span class="kw">then</span> xss</span>
+<span id="cb7-21"><a href="#cb7-21" aria-hidden="true" tabindex="-1"></a>  <span class="kw">else</span> append (<span class="fu">head</span> xss) (<span class="fu">concat</span> (<span class="fu">tail</span> xss)));</span>
+<span id="cb7-22"><a href="#cb7-22" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-23"><a href="#cb7-23" aria-hidden="true" tabindex="-1"></a>rec <span class="fu">length</span> <span class="ot">=</span> func (xs) (</span>
+<span id="cb7-24"><a href="#cb7-24" aria-hidden="true" tabindex="-1"></a>  <span class="kw">if</span> empty xs </span>
+<span id="cb7-25"><a href="#cb7-25" aria-hidden="true" tabindex="-1"></a>  <span class="kw">then</span> <span class="dv">0</span> </span>
+<span id="cb7-26"><a href="#cb7-26" aria-hidden="true" tabindex="-1"></a>  <span class="kw">else</span> <span class="op">+</span> <span class="dv">1</span> (<span class="fu">length</span> (<span class="fu">tail</span> xs)));</span>
+<span id="cb7-27"><a href="#cb7-27" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-28"><a href="#cb7-28" aria-hidden="true" tabindex="-1"></a>rec <span class="fu">takeWhile</span> <span class="ot">=</span> func (p xs) (</span>
+<span id="cb7-29"><a href="#cb7-29" aria-hidden="true" tabindex="-1"></a>  <span class="kw">if</span> empty xs </span>
+<span id="cb7-30"><a href="#cb7-30" aria-hidden="true" tabindex="-1"></a>  <span class="kw">then</span> xs </span>
+<span id="cb7-31"><a href="#cb7-31" aria-hidden="true" tabindex="-1"></a>  <span class="kw">else</span> <span class="kw">if</span> p (<span class="fu">head</span> xs) </span>
+<span id="cb7-32"><a href="#cb7-32" aria-hidden="true" tabindex="-1"></a>    <span class="kw">then</span> cons (<span class="fu">head</span> x) (<span class="fu">takeWhile</span> p (<span class="fu">tail</span> x)) </span>
+<span id="cb7-33"><a href="#cb7-33" aria-hidden="true" tabindex="-1"></a>    <span class="kw">else</span> (<span class="fu">takeWhile</span> p (<span class="fu">tail</span> x)));</span>
+<span id="cb7-34"><a href="#cb7-34" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-35"><a href="#cb7-35" aria-hidden="true" tabindex="-1"></a>rec <span class="fu">iterate</span> <span class="ot">=</span> func (f x) (</span>
+<span id="cb7-36"><a href="#cb7-36" aria-hidden="true" tabindex="-1"></a>  cons x (<span class="fu">iterate</span> f (f x)));</span>
+<span id="cb7-37"><a href="#cb7-37" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-38"><a href="#cb7-38" aria-hidden="true" tabindex="-1"></a>rec <span class="fu">take</span> <span class="ot">=</span> func (n xs) (</span>
+<span id="cb7-39"><a href="#cb7-39" aria-hidden="true" tabindex="-1"></a>  <span class="kw">if</span> <span class="op">==</span> <span class="dv">0</span> n </span>
+<span id="cb7-40"><a href="#cb7-40" aria-hidden="true" tabindex="-1"></a>  <span class="kw">then</span> nil </span>
+<span id="cb7-41"><a href="#cb7-41" aria-hidden="true" tabindex="-1"></a>  <span class="kw">else</span> cons (<span class="fu">head</span> x) (<span class="fu">take</span> (<span class="op">-</span> n <span class="dv">1</span>) (<span class="fu">tail</span> xs)));</span></code></pre></div>
+<p>Now <code>elem :: Eq a =&gt; a -&gt; [a] -&gt; Bool</code> is a little troublesome. We don't have typeclasses in LamE, so we can't overload the <code>==</code> operator. So we'll need to write a specialized function for checking if a string is a member of a list of strings.</p>
+<div class="sourceCode" id="cb8"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a>rec elemStr <span class="ot">=</span> func (x xs) (</span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a>  <span class="kw">if</span> empty xs </span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a>  <span class="kw">then</span> false </span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true" tabindex="-1"></a>  <span class="kw">else</span> <span class="kw">if</span> <span class="ot">=</span>s x (<span class="fu">head</span> xs) </span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true" tabindex="-1"></a>    <span class="kw">then</span> true </span>
+<span id="cb8-6"><a href="#cb8-6" aria-hidden="true" tabindex="-1"></a>    <span class="kw">else</span> elemStr x (<span class="fu">tail</span> xs));</span></code></pre></div>
+<p>Now we can start recreating our program in LamE.</p>
+<div class="sourceCode" id="cb9"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a>rec frees <span class="ot">=</span> func (t) (match t as</span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a>  (<span class="dt">Var</span> n) ([n])</span>
+<span id="cb9-3"><a href="#cb9-3" aria-hidden="true" tabindex="-1"></a>  (<span class="dt">App</span> u v) (append (frees u) (frees v))</span>
+<span id="cb9-4"><a href="#cb9-4" aria-hidden="true" tabindex="-1"></a>  (<span class="dt">Abs</span> n v) ( <span class="fu">filter</span> (func (m) (<span class="fu">not</span> (<span class="ot">=</span>s n m))) (frees v))); </span></code></pre></div>
+<p>The function <code>frees</code> is quite straightforward.</p>
+<div class="sourceCode" id="cb10"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a>val names <span class="ot">=</span> [<span class="st">&quot;a&quot;</span>,<span class="st">&quot;b&quot;</span>,<span class="st">&quot;c&quot;</span>,<span class="st">&quot;d&quot;</span>,<span class="st">&quot;e&quot;</span>,<span class="st">&quot;f&quot;</span>,<span class="st">&quot;g&quot;</span>,<span class="st">&quot;h&quot;</span>,<span class="st">&quot;i&quot;</span>,<span class="st">&quot;j&quot;</span>,<span class="st">&quot;k&quot;</span>,<span class="st">&quot;l&quot;</span>,<span class="st">&quot;m&quot;</span>,<span class="st">&quot;n&quot;</span>,<span class="st">&quot;o&quot;</span>,<span class="st">&quot;p&quot;</span>,<span class="st">&quot;q&quot;</span>,<span class="st">&quot;r&quot;</span>,<span class="st">&quot;s&quot;</span>,<span class="st">&quot;t&quot;</span>,<span class="st">&quot;u&quot;</span>,<span class="st">&quot;v&quot;</span>,<span class="st">&quot;w&quot;</span>,<span class="st">&quot;x&quot;</span>,<span class="st">&quot;y&quot;</span>,<span class="st">&quot;z&quot;</span>];</span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a>val chars <span class="ot">=</span> [<span class="ch">&#39;a&#39;</span>,<span class="ch">&#39;b&#39;</span>,<span class="ch">&#39;c&#39;</span>,<span class="ch">&#39;d&#39;</span>,<span class="ch">&#39;e&#39;</span>,<span class="ch">&#39;f&#39;</span>,<span class="ch">&#39;g&#39;</span>,<span class="ch">&#39;h&#39;</span>,<span class="ch">&#39;i&#39;</span>,<span class="ch">&#39;j&#39;</span>,<span class="ch">&#39;k&#39;</span>,<span class="ch">&#39;l&#39;</span>,<span class="ch">&#39;m&#39;</span>,<span class="ch">&#39;n&#39;</span>,<span class="ch">&#39;o&#39;</span>,<span class="ch">&#39;p&#39;</span>,<span class="ch">&#39;q&#39;</span>,<span class="ch">&#39;r&#39;</span>,<span class="ch">&#39;s&#39;</span>,<span class="ch">&#39;t&#39;</span>,<span class="ch">&#39;u&#39;</span>,<span class="ch">&#39;v&#39;</span>,<span class="ch">&#39;w&#39;</span>,<span class="ch">&#39;x&#39;</span>,<span class="ch">&#39;y&#39;</span>,<span class="ch">&#39;z&#39;</span>];</span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-4"><a href="#cb10-4" aria-hidden="true" tabindex="-1"></a>rec gen <span class="ot">=</span> func (n) (</span>
+<span id="cb10-5"><a href="#cb10-5" aria-hidden="true" tabindex="-1"></a>  <span class="kw">if</span> <span class="op">==</span> n <span class="dv">0</span> </span>
+<span id="cb10-6"><a href="#cb10-6" aria-hidden="true" tabindex="-1"></a>  <span class="kw">then</span> [<span class="st">&quot;a&quot;</span>]</span>
+<span id="cb10-7"><a href="#cb10-7" aria-hidden="true" tabindex="-1"></a>  <span class="kw">else</span> (<span class="kw">if</span> <span class="op">==</span> n <span class="dv">1</span> </span>
+<span id="cb10-8"><a href="#cb10-8" aria-hidden="true" tabindex="-1"></a>    <span class="kw">then</span> names</span>
+<span id="cb10-9"><a href="#cb10-9" aria-hidden="true" tabindex="-1"></a>    <span class="kw">else</span> <span class="kw">let</span> val ns <span class="ot">=</span> gen (<span class="op">-</span> n <span class="dv">1</span>) <span class="kw">in</span> (</span>
+<span id="cb10-10"><a href="#cb10-10" aria-hidden="true" tabindex="-1"></a>      <span class="kw">let</span> val f <span class="ot">=</span> func (s) (</span>
+<span id="cb10-11"><a href="#cb10-11" aria-hidden="true" tabindex="-1"></a>        <span class="kw">let</span> val g <span class="ot">=</span> func (t) (</span>
+<span id="cb10-12"><a href="#cb10-12" aria-hidden="true" tabindex="-1"></a>          <span class="op">+</span>s s t) </span>
+<span id="cb10-13"><a href="#cb10-13" aria-hidden="true" tabindex="-1"></a>        <span class="kw">in</span> <span class="fu">concat</span> (<span class="fu">map</span> g names)) </span>
+<span id="cb10-14"><a href="#cb10-14" aria-hidden="true" tabindex="-1"></a>      <span class="kw">in</span> (<span class="fu">concat</span> (<span class="fu">map</span> f chars)))));</span></code></pre></div>
+<p>We can rewrite list comprehensions in terms of <code>concat</code> and <code>map</code> to get this rather verbose definition of <code>gen</code>.</p>
+<div class="sourceCode" id="cb11"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a>val fresh <span class="ot">=</span> func (ns) (</span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> val n <span class="ot">=</span> <span class="fu">length</span> ns <span class="kw">in</span> (</span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> val k <span class="ot">=</span> <span class="fu">length</span> (<span class="fu">takeWhile</span> (leq n) (<span class="fu">iterate</span> (func (x)  (<span class="op">*</span> x <span class="dv">26</span>)) <span class="dv">1</span>)) <span class="kw">in</span> (</span>
+<span id="cb11-4"><a href="#cb11-4" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> val ps <span class="ot">=</span> <span class="fu">take</span> (<span class="op">+</span> <span class="dv">1</span> n) (gen k) <span class="kw">in</span> (</span>
+<span id="cb11-5"><a href="#cb11-5" aria-hidden="true" tabindex="-1"></a>    <span class="fu">head</span> (<span class="fu">filter</span> (func (x) (<span class="fu">not</span> (elemStr x ns))) ps)))));</span>
+<span id="cb11-6"><a href="#cb11-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-7"><a href="#cb11-7" aria-hidden="true" tabindex="-1"></a>rec sub <span class="ot">=</span> func (s t x) (match s as</span>
+<span id="cb11-8"><a href="#cb11-8" aria-hidden="true" tabindex="-1"></a>  (<span class="dt">Var</span> a) (<span class="kw">if</span> <span class="ot">=</span>s x a <span class="kw">then</span> t <span class="kw">else</span> s)</span>
+<span id="cb11-9"><a href="#cb11-9" aria-hidden="true" tabindex="-1"></a>  (<span class="dt">App</span> a b) (<span class="dt">App</span> (sub a t x) (sub b t x))</span>
+<span id="cb11-10"><a href="#cb11-10" aria-hidden="true" tabindex="-1"></a>  (<span class="dt">Abs</span> a b) (<span class="kw">let</span> val ts <span class="ot">=</span> frees t <span class="kw">in</span> (</span>
+<span id="cb11-11"><a href="#cb11-11" aria-hidden="true" tabindex="-1"></a>    <span class="kw">if</span> <span class="fu">or</span> (<span class="ot">=</span>s x a) (elemStr a ts) </span>
+<span id="cb11-12"><a href="#cb11-12" aria-hidden="true" tabindex="-1"></a>    <span class="kw">then</span> <span class="kw">let</span> val z <span class="ot">=</span> fresh (<span class="fu">concat</span> [ts, frees b, [a]]) <span class="kw">in</span> (<span class="dt">Abs</span> z (sub (sub s (<span class="dt">Var</span> z) y) t x ) )</span>
+<span id="cb11-13"><a href="#cb11-13" aria-hidden="true" tabindex="-1"></a>    <span class="kw">else</span> <span class="dt">Abs</span> a (sub t x b))));</span></code></pre></div>
+<p>Defining <code>fresh</code> and <code>sub</code> is straightforward.</p>
+<div class="sourceCode" id="cb12"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a>val bred <span class="ot">=</span> func (t) (match t as </span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true" tabindex="-1"></a>  (<span class="dt">Var</span> x) (nil)</span>
+<span id="cb12-3"><a href="#cb12-3" aria-hidden="true" tabindex="-1"></a>  (<span class="dt">App</span> p q) (match p as</span>
+<span id="cb12-4"><a href="#cb12-4" aria-hidden="true" tabindex="-1"></a>    (<span class="dt">Var</span> x) (nil)</span>
+<span id="cb12-5"><a href="#cb12-5" aria-hidden="true" tabindex="-1"></a>    (<span class="dt">App</span> a b) (nil)</span>
+<span id="cb12-6"><a href="#cb12-6" aria-hidden="true" tabindex="-1"></a>    (<span class="dt">Abs</span> x s) ([sub s q x]))</span>
+<span id="cb12-7"><a href="#cb12-7" aria-hidden="true" tabindex="-1"></a>  (<span class="dt">Abs</span> x s) (nil));</span></code></pre></div>
+<p>We don't have <code>Maybe</code>, but we can simulate it with lists, where <code>[] = Nothing</code> and <code>[a] = Just a</code>.</p>
+<div class="sourceCode" id="cb13"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a>rec lred <span class="ot">=</span> func (t) (match t as</span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a>  (<span class="dt">Var</span> x) (nil)</span>
+<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a>  (<span class="dt">App</span> p q) (</span>
+<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a>    <span class="kw">if</span> empty (bred (<span class="dt">App</span> p q)) </span>
+<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a>    <span class="kw">then</span> (<span class="kw">if</span> empty (lred p) </span>
+<span id="cb13-6"><a href="#cb13-6" aria-hidden="true" tabindex="-1"></a>      <span class="kw">then</span> (<span class="kw">if</span> empty (lred q) </span>
+<span id="cb13-7"><a href="#cb13-7" aria-hidden="true" tabindex="-1"></a>        <span class="kw">then</span> nil  </span>
+<span id="cb13-8"><a href="#cb13-8" aria-hidden="true" tabindex="-1"></a>        <span class="kw">else</span> <span class="dt">App</span> p (<span class="fu">head</span> (lred q)))  </span>
+<span id="cb13-9"><a href="#cb13-9" aria-hidden="true" tabindex="-1"></a>      <span class="kw">else</span> <span class="dt">App</span> (<span class="fu">head</span> (lred p)) q ) </span>
+<span id="cb13-10"><a href="#cb13-10" aria-hidden="true" tabindex="-1"></a>    <span class="kw">else</span> <span class="fu">head</span> (bred (<span class="dt">App</span> p q)))</span>
+<span id="cb13-11"><a href="#cb13-11" aria-hidden="true" tabindex="-1"></a>  (<span class="dt">Abs</span> x s) (<span class="kw">if</span> empty (lred s) </span>
+<span id="cb13-12"><a href="#cb13-12" aria-hidden="true" tabindex="-1"></a>    <span class="kw">then</span> nil </span>
+<span id="cb13-13"><a href="#cb13-13" aria-hidden="true" tabindex="-1"></a>    <span class="kw">else</span> <span class="dt">Abs</span> x (<span class="fu">head</span> (lred x))));</span></code></pre></div>
+<p>Leftmost reduction is rather tedious to define.</p>
+<div class="sourceCode" id="cb14"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a>rec bnf <span class="ot">=</span> func (s) ( </span>
+<span id="cb14-2"><a href="#cb14-2" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> val xs <span class="ot">=</span> lred s <span class="kw">in</span> </span>
+<span id="cb14-3"><a href="#cb14-3" aria-hidden="true" tabindex="-1"></a>  (<span class="kw">if</span> empty xs </span>
+<span id="cb14-4"><a href="#cb14-4" aria-hidden="true" tabindex="-1"></a>  <span class="kw">then</span> s </span>
+<span id="cb14-5"><a href="#cb14-5" aria-hidden="true" tabindex="-1"></a>  <span class="kw">else</span> bnf (<span class="fu">head</span> xs))</span></code></pre></div>
+<p>Finally, we get <span class="math inline">\(\beta\)</span>-reduction!</p>
+<p>The program compiles into <a href="/bnf.txt">this very long term</a></p><div class="footer"><a href="http://danielmroz.co.uk">Click here to go back.</a></div></div></div><div class="footer"><p>Copyright &copy; 2022 Daniel Mroz</p></div></div></div></div></body></html>

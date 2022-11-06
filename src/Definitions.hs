@@ -4,15 +4,20 @@
 module Definitions where
 import Data.Aeson
 import GHC.Generics
+import Data.Time
 
 data Post a = Post {
   postName :: String,
   postTitle :: String,
   postDescription :: String,
---  postDate :: DateTime,
+  postDate :: Day, 
 --  postModDate :: Maybe DateTime,
   postBody :: a}
-  deriving (Show)
+  deriving (Show, Eq)
+
+
+instance Eq a => Ord (Post a) where
+  (<=) p q = postDate p <= postDate q
 
 data Note = Note {
   noteTitle :: String,

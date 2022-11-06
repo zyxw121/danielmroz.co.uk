@@ -18,17 +18,22 @@ import System.FilePath.Posix
 import Data.Aeson
 import qualified Data.ByteString.Lazy as B
 import System.IO.Error
-import qualified Data.DateTime as D
+import qualified Data.Time as D
+import Data.Time.Format.ISO8601
+import Data.Sort
 
 fromJust :: Maybe a -> a
 fromJust (Just a) = a
 
 inlineToString :: Inline -> String
-inlineToString (Str s) = s
+inlineToString (Str s) = unpack s
 inlineToString (Space) = " "
 
 inlinesToString :: [Inline] -> String
 inlinesToString = concat . map inlineToString
+
+stringToDate :: String -> Maybe D.Day
+stringToDate = iso8601ParseM 
 
 makePost :: PandocMonad m => (String, String) -> m (Post Pandoc)
 makePost (postName, s) = do 
@@ -37,6 +42,8 @@ makePost (postName, s) = do
       postTitle = inlinesToString postTitle'
       (MetaInlines postDescription') = fromJust $ lookupMeta "description" m
       postDescription = inlinesToString postDescription'
+      (MetaInlines postDate') = fromJust $ lookupMeta "date" m
+      postDate = fromJust . stringToDate . inlinesToString $ postDate' 
       postBody = p
   return Post{..}
 
@@ -106,7 +113,8 @@ publishPost (name, Left e) = do
   print e
   return Nothing
 publishPost (name, Right p) = do
-  writeFile ("public/posts" </> name <.> "html") (renderHtml . postToPage $ p)
+  today <- D.getCurrentTime
+  writeFile ("public/posts" </> name <.> "html") (renderHtml . postToPage today $ p)
   putStr $ "Post " ++ name ++ " published\n"
   return . Just $ fmap (const ()) p
   
@@ -164,7 +172,7 @@ main = do
           posts <- fmap filterMaybes . sequence . map doPost $ postpaths 
           -- :: [Post ()], all posts that have been published successfully 
           today <- D.getCurrentTime
-          let index = makeIndex today posts config'
+          let index = makeIndex today (reverse . sort $ posts) config'
           writeFile "public/index.html" (renderHtml index)
           s <- makeStyle (hstyle config') 
           publishHighlight s 

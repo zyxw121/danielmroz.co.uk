@@ -24,7 +24,7 @@ library:
   dependencies: 
   - blaze-html
   - aeson
-  - datetime
+  - time
 
 executables:
   website:
@@ -45,7 +45,8 @@ executables:
     - filepath
     - aeson
     - bytestring
-    - datetime
+    - time
+    - sort
 
   publish:
     main: Main.hs
@@ -78,3 +79,6 @@ tests:
     - -with-rtsopts=-N
     dependencies:
     - danielmroz-co-uk
+    - hspec
+    - QuickCheck 
+    - time

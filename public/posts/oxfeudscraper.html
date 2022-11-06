@@ -1,0 +1,533 @@
+<html><head><title>Daniel Mroz | Scraping Facebook posts with Haskell</title><link href="../css/main.css" rel="stylesheet" type="text/css"><link href="../css/highlight.css" rel="stylesheet" type="text/css"><link href="https://fonts.googleapis.com/css?family=Kanit|Lora|Seymour+One|Modak" rel="stylesheet"><script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.5/MathJax.js?config=TeX-MML-AM_CHTML" type="text/javascript" async="async"></script></head><body><div class="container"><div class="mainbar"><div class="maincontainer container"><div class="main box"><div class="center"><h1>Scraping Facebook posts with Haskell</h1></div><div class="inside"><hr><h2>Deprecated</h2>
+<p>Due to changes in the Facebook Graph API, most of this doesn't work anymore.</p>
+<h2>Introduction</h2>
+<p>The main back-end component of ~~Oxfeud.it~~(Now deprecated) is a Haskell program that grabs content from Facebook and puts it in a database. It makes use of the <a href="https://developers.facebook.com/docs/graph-api/">Facebook Graph Api</a> to make requests that return JSON objects from which data is extracted and inserted into the DB.</p>
+<p>It is used in two different ways:</p>
+<ol>
+<li>Once, grab all posts (and associated data) from a page to initially populate the database.<br />
+</li>
+<li>Repeatedly, grab the last n posts (and associated data) to update the database.</li>
+</ol>
+<p>The specific data we need to get is:</p>
+<ul>
+<li>All the posts to a certain page. For each post we store
+<ul>
+<li>The id, message, and time of posting</li>
+<li>All comments and reactions</li>
+</ul></li>
+<li>For a comment we store
+<ul>
+<li>The id, message, time of posting, and author</li>
+<li>All reply comments and reactions</li>
+<li>All tags</li>
+</ul></li>
+<li>For a reaction we store
+<ul>
+<li>The type (Like, Angry, etc), and author</li>
+</ul></li>
+<li>We also store all users who have interacted with the page by
+<ul>
+<li>Reacting to a post or comment</li>
+<li>Making a comment</li>
+<li>Being tagged in a comment</li>
+</ul></li>
+</ul>
+<p>It's important that the program be:</p>
+<ul>
+<li>Modular, so that we can get fetch content from arbitrary pages and do arbitrary things to it.<br />
+</li>
+<li>Reliable. If one part of the program fails, for example parsing one JSON object out of 20, the rest of the program should continue as best as it can.</li>
+<li>Log what it does, and any failures that occur.</li>
+<li>Easy to understand and extend.</li>
+</ul>
+<h2>Why Haskell?</h2>
+<p>There are a few reasons I decided to write this in Haskell.</p>
+<p>The underlying general pattern of "Get some input, parse it into objects, then process the objects" lends itself well to Haskell. Haskell also handles recursive data types very cleanly, as we'll see in the <strong>Paging</strong> section. Finally, the Haskell development style of "Write a library with functions that manipulate objects in your problem space, and then use those to write a small executable that solves a specific problem" will suit this rapidly changing project nicely.</p>
+<h2>Types</h2>
+<p>A good place to start is to think of what types of objects you're going to deal with. We can define the types of <code>Post</code>s, <code>Comment</code>s, <code>Reaction</code>s and <code>User</code>s in the obvious way.</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Post</span> <span class="ot">=</span> <span class="dt">Post</span> {<span class="ot"> postID ::</span> <span class="dt">Integer</span>,<span class="ot"> postmessage ::</span> <span class="dt">String</span>,<span class="ot"> posttime ::</span> <span class="dt">UTCTime</span>,<span class="ot"> postcomments ::</span> [<span class="dt">Comment</span>],<span class="ot"> postreactions ::</span> [<span class="dt">Reaction</span>] } <span class="kw">deriving</span> <span class="dt">Show</span></span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Comment</span> <span class="ot">=</span> <span class="dt">Comment</span> {<span class="ot"> commentid ::</span> <span class="dt">Integer</span>,<span class="ot"> parentid ::</span> <span class="dt">Integer</span>,<span class="ot"> commenttime::</span><span class="dt">String</span>,<span class="ot"> commentmessage ::</span> <span class="dt">String</span>,<span class="ot"> commentauthor ::</span> <span class="dt">User</span>,<span class="ot"> commenttags ::</span> [<span class="dt">User</span>] } <span class="kw">deriving</span> <span class="dt">Show</span></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">User</span> <span class="ot">=</span> <span class="dt">User</span> {<span class="ot"> userid ::</span> <span class="dt">Integer</span>,<span class="ot"> username ::</span> <span class="dt">String</span> } <span class="kw">deriving</span> <span class="dt">Show</span></span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Reaction</span> <span class="ot">=</span> <span class="dt">Reaction</span> {<span class="ot"> reactiontype ::</span> <span class="dt">String</span>,<span class="ot"> reactionauthor ::</span> <span class="dt">User</span> } <span class="kw">deriving</span> <span class="dt">Show</span></span></code></pre></div>
+<h2>Facebook Graph API</h2>
+<p>If you have the ID for a post you can use the Facebook Graph API to get all sorts of information about it. An <a href="https://developers.facebook.com/docs/facebook-login/access-tokens/">access token</a> is also required for each query. The standard query we'll be making will be an HTTPS GET request on a URL that looks like <code>https://graph.facebook.com/v2.10/[POST_ID]?fields=reactions%2Ccomments%7Bmessage%2Cfrom%2Cmessage_tags%2Ccreated_time%7D%2Cmessage%2Ccreated_time&amp;access_token=[TOKEN]</code></p>
+<p>This will return a JSON object that looks like the anonymized example below.</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode json"><code class="sourceCode json"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;reactions&quot;</span><span class="fu">:</span> <span class="fu">{</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;data&quot;</span><span class="fu">:</span> <span class="ot">[</span></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>      <span class="fu">{</span></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>        <span class="dt">&quot;id&quot;</span><span class="fu">:</span> <span class="st">&quot;0123456789&quot;</span><span class="fu">,</span></span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a>        <span class="dt">&quot;name&quot;</span><span class="fu">:</span> <span class="st">&quot;John Doe&quot;</span></span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a>        <span class="st">&quot;type&quot;</span><span class="er">:</span> <span class="st">&quot;LIKE&quot;</span></span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a>      <span class="fu">}</span></span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a>    <span class="ot">]</span><span class="fu">,</span></span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;paging&quot;</span><span class="fu">:</span> <span class="fu">{</span></span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;cursors&quot;</span><span class="fu">:</span> <span class="fu">{</span></span>
+<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a>        <span class="dt">&quot;before&quot;</span><span class="fu">:</span> <span class="st">&quot;TVRBd01EQXdORGd5TXpRM016ZAzJPakUxTVRZAd016TTBORFE2TWpVME1EazJNVFl4TXc9PQZDZD&quot;</span><span class="fu">,</span></span>
+<span id="cb2-13"><a href="#cb2-13" aria-hidden="true" tabindex="-1"></a>        <span class="dt">&quot;after&quot;</span><span class="fu">:</span> <span class="st">&quot;TVRBd01EQTJNVEUwTURrd01UazNPakUxTVRZAd01qazVNakk2TnpnNE5qUTRNRE0zT1RFek16RXkZD&quot;</span></span>
+<span id="cb2-14"><a href="#cb2-14" aria-hidden="true" tabindex="-1"></a>      <span class="fu">}</span></span>
+<span id="cb2-15"><a href="#cb2-15" aria-hidden="true" tabindex="-1"></a>    <span class="fu">}</span></span>
+<span id="cb2-16"><a href="#cb2-16" aria-hidden="true" tabindex="-1"></a>  <span class="fu">},</span></span>
+<span id="cb2-17"><a href="#cb2-17" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;comments&quot;</span><span class="fu">:</span> <span class="fu">{</span></span>
+<span id="cb2-18"><a href="#cb2-18" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;data&quot;</span><span class="fu">:</span> <span class="ot">[</span></span>
+<span id="cb2-19"><a href="#cb2-19" aria-hidden="true" tabindex="-1"></a>      <span class="fu">{</span></span>
+<span id="cb2-20"><a href="#cb2-20" aria-hidden="true" tabindex="-1"></a>        <span class="dt">&quot;message&quot;</span><span class="fu">:</span> <span class="st">&quot;Jane Doe oh. My. God.&quot;</span><span class="fu">,</span></span>
+<span id="cb2-21"><a href="#cb2-21" aria-hidden="true" tabindex="-1"></a>        <span class="dt">&quot;from&quot;</span><span class="fu">:</span> <span class="fu">{</span></span>
+<span id="cb2-22"><a href="#cb2-22" aria-hidden="true" tabindex="-1"></a>          <span class="dt">&quot;name&quot;</span><span class="fu">:</span> <span class="st">&quot;John Doe&quot;</span><span class="fu">,</span></span>
+<span id="cb2-23"><a href="#cb2-23" aria-hidden="true" tabindex="-1"></a>          <span class="dt">&quot;id&quot;</span><span class="fu">:</span> <span class="st">&quot;0123456789&quot;</span></span>
+<span id="cb2-24"><a href="#cb2-24" aria-hidden="true" tabindex="-1"></a>        <span class="fu">},</span></span>
+<span id="cb2-25"><a href="#cb2-25" aria-hidden="true" tabindex="-1"></a>        <span class="dt">&quot;message_tags&quot;</span><span class="fu">:</span> <span class="ot">[</span></span>
+<span id="cb2-26"><a href="#cb2-26" aria-hidden="true" tabindex="-1"></a>          <span class="fu">{</span></span>
+<span id="cb2-27"><a href="#cb2-27" aria-hidden="true" tabindex="-1"></a>            <span class="dt">&quot;id&quot;</span><span class="fu">:</span> <span class="st">&quot;9876543210&quot;</span><span class="fu">,</span></span>
+<span id="cb2-28"><a href="#cb2-28" aria-hidden="true" tabindex="-1"></a>            <span class="dt">&quot;length&quot;</span><span class="fu">:</span> <span class="dv">16</span><span class="fu">,</span></span>
+<span id="cb2-29"><a href="#cb2-29" aria-hidden="true" tabindex="-1"></a>            <span class="dt">&quot;name&quot;</span><span class="fu">:</span> <span class="st">&quot;Jane Doe&quot;</span><span class="fu">,</span></span>
+<span id="cb2-30"><a href="#cb2-30" aria-hidden="true" tabindex="-1"></a>            <span class="dt">&quot;offset&quot;</span><span class="fu">:</span> <span class="dv">0</span><span class="fu">,</span></span>
+<span id="cb2-31"><a href="#cb2-31" aria-hidden="true" tabindex="-1"></a>            <span class="dt">&quot;type&quot;</span><span class="fu">:</span> <span class="st">&quot;user&quot;</span></span>
+<span id="cb2-32"><a href="#cb2-32" aria-hidden="true" tabindex="-1"></a>          <span class="fu">}</span></span>
+<span id="cb2-33"><a href="#cb2-33" aria-hidden="true" tabindex="-1"></a>        <span class="ot">]</span><span class="fu">,</span></span>
+<span id="cb2-34"><a href="#cb2-34" aria-hidden="true" tabindex="-1"></a>        <span class="dt">&quot;created_time&quot;</span><span class="fu">:</span> <span class="st">&quot;2018-01-15T13:42:10+0000&quot;</span><span class="fu">,</span></span>
+<span id="cb2-35"><a href="#cb2-35" aria-hidden="true" tabindex="-1"></a>        <span class="dt">&quot;id&quot;</span><span class="fu">:</span> <span class="st">&quot;561927510810787_562062857463919&quot;</span></span>
+<span id="cb2-36"><a href="#cb2-36" aria-hidden="true" tabindex="-1"></a>      <span class="fu">}</span><span class="ot">,</span></span>
+<span id="cb2-37"><a href="#cb2-37" aria-hidden="true" tabindex="-1"></a>    <span class="ot">]</span><span class="fu">,</span></span>
+<span id="cb2-38"><a href="#cb2-38" aria-hidden="true" tabindex="-1"></a>    <span class="dt">&quot;paging&quot;</span><span class="fu">:</span> <span class="fu">{</span></span>
+<span id="cb2-39"><a href="#cb2-39" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;cursors&quot;</span><span class="fu">:</span> <span class="fu">{</span></span>
+<span id="cb2-40"><a href="#cb2-40" aria-hidden="true" tabindex="-1"></a>        <span class="dt">&quot;before&quot;</span><span class="fu">:</span> <span class="st">&quot;WTI5dGJXVnVkRjlqZAFhKemIzSTZAOVFl5TURZAeU9EVTNORFl6T1RFNU9qRTFNVFl3TWpNM016QT0ZD&quot;</span><span class="fu">,</span></span>
+<span id="cb2-41"><a href="#cb2-41" aria-hidden="true" tabindex="-1"></a>        <span class="dt">&quot;after&quot;</span><span class="fu">:</span> <span class="st">&quot;WTI5dGJXVnVkRjlqZAFhKemIzSTZAOVFl5TVRVMk56QTBNVEl4TWpBeE9qRTFNVFl3TXpjME5EYz0ZD&quot;</span></span>
+<span id="cb2-42"><a href="#cb2-42" aria-hidden="true" tabindex="-1"></a>      <span class="fu">}</span></span>
+<span id="cb2-43"><a href="#cb2-43" aria-hidden="true" tabindex="-1"></a>    <span class="fu">}</span></span>
+<span id="cb2-44"><a href="#cb2-44" aria-hidden="true" tabindex="-1"></a>  <span class="fu">},</span></span>
+<span id="cb2-45"><a href="#cb2-45" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;message&quot;</span><span class="fu">:</span> <span class="st">&quot;#Oxfeud_7254</span></span>
+<span id="cb2-46"><a href="#cb2-46" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-47"><a href="#cb2-47" aria-hidden="true" tabindex="-1"></a><span class="st">To the girl outside cellar who stole my burger, that wasn’t ok.&quot;</span><span class="fu">,</span></span>
+<span id="cb2-48"><a href="#cb2-48" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;created_time&quot;</span><span class="fu">:</span> <span class="st">&quot;2018-01-15T05:40:50+0000&quot;</span><span class="fu">,</span></span>
+<span id="cb2-49"><a href="#cb2-49" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;id&quot;</span><span class="fu">:</span> <span class="st">&quot;409018456101694_561927510810787&quot;</span></span>
+<span id="cb2-50"><a href="#cb2-50" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div>
+<p>How easy! Everything we need is right there. Now how do we write a function that gets this for us?</p>
+<p>Haskell has a few http libraries, but I like the simplicity of <a href="https://hackage.haskell.org/package/req-1.0.0/docs/Network-HTTP-Req.html">req</a>. Looking at the documentation, we see that something like this will work:</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="ot">{-# LANGUAGE OverloadedStrings#-}</span></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a><span class="kw">import</span> <span class="dt">Network.HTTP.Req</span></span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a><span class="kw">import</span> <span class="kw">qualified</span> <span class="dt">Data.ByteString.Lazy</span> <span class="kw">as</span> <span class="dt">B</span></span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a><span class="kw">import</span> <span class="kw">qualified</span> <span class="dt">Data.Text</span> <span class="kw">as</span> <span class="dt">T</span></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a><span class="kw">instance</span> <span class="dt">MonadHttp</span> <span class="dt">IO</span> <span class="kw">where</span></span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>  handleHttpException <span class="ot">=</span> throwIO</span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a><span class="ot">options ::</span> <span class="dt">Token</span> <span class="ot">-&gt;</span> <span class="dt">Option</span> scheme</span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a>options token <span class="ot">=</span>  </span>
+<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a>  (<span class="fu">mconcat</span> [ <span class="st">&quot;fields&quot;</span> <span class="op">=:</span> (<span class="st">&quot;reactions,comments{message,from,message_tags,created_time},message,created_time&quot;</span><span class="ot"> ::</span> <span class="dt">String</span>), <span class="st">&quot;access_token&quot;</span> <span class="op">=:</span> (<span class="ot">token ::</span> <span class="dt">String</span>) ] )</span>
+<span id="cb3-13"><a href="#cb3-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-14"><a href="#cb3-14" aria-hidden="true" tabindex="-1"></a><span class="ot">postFromFB ::</span> <span class="dt">Token</span> <span class="ot">-&gt;</span> <span class="dt">PostID</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> <span class="dt">B.ByteString</span></span>
+<span id="cb3-15"><a href="#cb3-15" aria-hidden="true" tabindex="-1"></a>postFromFB token p <span class="ot">=</span> <span class="kw">do</span> </span>
+<span id="cb3-16"><a href="#cb3-16" aria-hidden="true" tabindex="-1"></a>    r <span class="ot">&lt;-</span> (req </span>
+<span id="cb3-17"><a href="#cb3-17" aria-hidden="true" tabindex="-1"></a>      <span class="dt">GET</span> </span>
+<span id="cb3-18"><a href="#cb3-18" aria-hidden="true" tabindex="-1"></a>      (https <span class="st">&quot;graph.facebook.com&quot;</span> <span class="op">/:</span> <span class="st">&quot;v2.10&quot;</span> <span class="op">/:</span> (T.pack p)) </span>
+<span id="cb3-19"><a href="#cb3-19" aria-hidden="true" tabindex="-1"></a>      <span class="dt">NoReqBody</span> </span>
+<span id="cb3-20"><a href="#cb3-20" aria-hidden="true" tabindex="-1"></a>      lbsResponse </span>
+<span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a>      options token)</span>
+<span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a>  <span class="fu">return</span> (responseBody<span class="ot"> r ::</span> <span class="dt">B.ByteString</span>)</span></code></pre></div>
+<p>Here <code>Token</code> and <code>PostID</code> are type synonyms for <code>String</code>.</p>
+<p>Now all we have to do is use the <a href="https://hackage.haskell.org/package/aeson">Aeson</a> library to parse this response into a <code>Post</code>.</p>
+<h2>Parsing</h2>
+<p>With the Aeson library, you can easily parse JSON into a Haskell object if you jsut define an instance of <code>FromJSON</code> for it. I found <a href="https://artyom.me/aeson">this guide</a> very valuable.</p>
+<p>Let's start by parsing a <code>User</code>, and building up to <code>Post</code> from there.</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="ot">{-# LANGUAGE OverloadedStrings, DeriveGeneric, RecordWildCards #-}</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a><span class="kw">import</span> <span class="dt">Data.Aeson</span></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a><span class="kw">import</span> <span class="dt">Data.Aeson.Types</span></span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a><span class="kw">import</span> <span class="kw">qualified</span> <span class="dt">Data.HashMap.Strict</span> <span class="kw">as</span> <span class="dt">H</span></span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a><span class="kw">import</span> <span class="kw">qualified</span> <span class="dt">Data.Vector</span> <span class="kw">as</span> <span class="dt">V</span></span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a><span class="kw">instance</span> <span class="dt">FromJSON</span> <span class="dt">User</span> <span class="kw">where</span></span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a>  parseJSON <span class="ot">=</span> withObject <span class="st">&quot;user&#39;&quot;</span> <span class="op">$</span> \o <span class="ot">-&gt;</span> <span class="kw">do</span></span>
+<span id="cb4-10"><a href="#cb4-10" aria-hidden="true" tabindex="-1"></a>    userid&#39; <span class="ot">&lt;-</span> o <span class="op">.:</span> <span class="st">&quot;id&quot;</span></span>
+<span id="cb4-11"><a href="#cb4-11" aria-hidden="true" tabindex="-1"></a>    username <span class="ot">&lt;-</span> o<span class="op">.:</span> <span class="st">&quot;name&quot;</span></span>
+<span id="cb4-12"><a href="#cb4-12" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> userid <span class="ot">=</span> <span class="fu">read</span> userid&#39;</span>
+<span id="cb4-13"><a href="#cb4-13" aria-hidden="true" tabindex="-1"></a>    <span class="fu">return</span> <span class="dt">User</span>{<span class="op">..</span>} </span></code></pre></div>
+<p>This is completely standard. Now, notice how a <code>Reaction</code> JSON object also has "from" and "id" fields, corresponding to the reacting user? We can actually parse a <code>Reaction</code> object by reading the reaction type, and getting the user by <em>parsing the object again, this time as a user</em>.</p>
+<p>We don't even need to annotate the type of <code>ParseJSON :: Value -&gt; Parser a</code> as <code>Value -&gt; Parser User</code>, Haskell can infer the type by seeing that we bind it to <code>reactionauthor</code>, which it knows is of type <code>User</code>. Neat!</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="kw">instance</span> <span class="dt">FromJSON</span> <span class="dt">Reaction</span> <span class="kw">where</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>  parseJSON <span class="ot">=</span> withObject <span class="st">&quot;reaction&quot;</span> <span class="op">$</span> \o <span class="ot">-&gt;</span> <span class="kw">do</span></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>    reactiontype <span class="ot">&lt;-</span> o<span class="op">.:</span> <span class="st">&quot;type&quot;</span></span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a>    reactionauthor <span class="ot">&lt;-</span> parseJSON (<span class="dt">Object</span> o)</span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a>    <span class="fu">return</span> <span class="dt">Reaction</span>{<span class="op">..</span>}</span></code></pre></div>
+<p>We do something similar for parsing <code>Comment</code>s. Not every Comment JSON object <em>has</em> a <code>message_tags</code> field (when the comment doesn't contain any tags the Facebook API doesn't even return a <code>message_tags</code> field), so we need to be careful. Thankfully, Aeson allows us to provide a default value if a key doesn't appear. Finally, we can parse the array of tags directly into a list of <code>User</code>s.</p>
+<div class="sourceCode" id="cb6"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="kw">instance</span> <span class="dt">FromJSON</span> <span class="dt">Comment</span> <span class="kw">where</span></span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>  parseJSON <span class="ot">=</span> withObject <span class="st">&quot;comment&quot;</span> <span class="op">$</span> \o <span class="ot">-&gt;</span> <span class="kw">do</span></span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a>    cmessage <span class="ot">&lt;-</span> (o <span class="op">.:</span> <span class="st">&quot;message&quot;</span>)</span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a>    commentid&#39; <span class="ot">&lt;-</span> (o<span class="op">.:</span> <span class="st">&quot;id&quot;</span>)</span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a>    from <span class="ot">&lt;-</span> o <span class="op">.:</span> <span class="st">&quot;from&quot;</span></span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a>    author <span class="ot">&lt;-</span> parseJSON (<span class="dt">Object</span> from)</span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true" tabindex="-1"></a>    commenttime <span class="ot">&lt;-</span> o<span class="op">.:</span> <span class="st">&quot;created_time&quot;</span></span>
+<span id="cb6-8"><a href="#cb6-8" aria-hidden="true" tabindex="-1"></a>    ttags <span class="ot">&lt;-</span> o <span class="op">.:?</span> <span class="st">&quot;message_tags&quot;</span> <span class="op">.!=</span> V.empty </span>
+<span id="cb6-9"><a href="#cb6-9" aria-hidden="true" tabindex="-1"></a>    tags <span class="ot">&lt;-</span> parseJSON (<span class="dt">Array</span> ttags)</span>
+<span id="cb6-10"><a href="#cb6-10" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> commentid <span class="ot">=</span> <span class="fu">read</span> <span class="op">$</span> <span class="fu">tail</span> <span class="op">.</span> <span class="fu">dropWhile</span> (<span class="op">/=</span><span class="ch">&#39;_&#39;</span>)<span class="op">$</span> cid&#39; </span>
+<span id="cb6-11"><a href="#cb6-11" aria-hidden="true" tabindex="-1"></a>        parentid <span class="ot">=</span> <span class="fu">read</span> <span class="op">$</span> <span class="fu">takeWhile</span> (<span class="op">/=</span><span class="ch">&#39;_&#39;</span>) <span class="op">$</span> cid&#39;</span>
+<span id="cb6-12"><a href="#cb6-12" aria-hidden="true" tabindex="-1"></a>    <span class="fu">return</span> <span class="dt">Comment</span>{<span class="op">..</span>}</span></code></pre></div>
+<p>Finally, we can parse a <code>Post</code> like this.</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a><span class="kw">instance</span> <span class="dt">FromJSON</span> <span class="dt">PostResponse</span> <span class="kw">where</span></span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a>  parseJSON <span class="ot">=</span> withObject <span class="st">&quot;response&quot;</span> <span class="op">$</span> \o <span class="ot">-&gt;</span> <span class="kw">do</span></span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a>    rs <span class="ot">&lt;-</span> o <span class="op">.:?</span> <span class="st">&quot;reactions&quot;</span> <span class="op">.!=</span> (H.empty<span class="ot"> ::</span> <span class="dt">H.HashMap</span> <span class="dt">T.Text</span> <span class="dt">Value</span>)</span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a>    rd <span class="ot">&lt;-</span> rs <span class="op">.:&gt;</span> <span class="st">&quot;data&quot;</span> <span class="op">.!=</span>  V.empty </span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a>    postreactions <span class="ot">&lt;-</span> parseJSON (<span class="dt">Array</span> rd)</span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a>    cs <span class="ot">&lt;-</span> o <span class="op">.:?</span> <span class="st">&quot;comments&quot;</span> <span class="op">.!=</span> (H.empty<span class="ot"> ::</span> <span class="dt">H.HashMap</span> <span class="dt">T.Text</span> <span class="dt">Value</span>)</span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true" tabindex="-1"></a>    cd <span class="ot">&lt;-</span> cs <span class="op">.:?</span> <span class="st">&quot;data&quot;</span> <span class="op">.!=</span> V.empty</span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true" tabindex="-1"></a>    postcomments <span class="ot">&lt;-</span> parseJSON (<span class="dt">Array</span> cd)  </span>
+<span id="cb7-10"><a href="#cb7-10" aria-hidden="true" tabindex="-1"></a>    postmessage <span class="ot">&lt;-</span> o <span class="op">.:</span> <span class="st">&quot;message&quot;</span></span>
+<span id="cb7-11"><a href="#cb7-11" aria-hidden="true" tabindex="-1"></a>    time_string <span class="ot">&lt;-</span> o<span class="op">.:</span> <span class="st">&quot;created_time&quot;</span></span>
+<span id="cb7-12"><a href="#cb7-12" aria-hidden="true" tabindex="-1"></a>    postid&#39; <span class="ot">&lt;-</span> o<span class="op">.:</span> <span class="st">&quot;id&quot;</span></span>
+<span id="cb7-13"><a href="#cb7-13" aria-hidden="true" tabindex="-1"></a>    <span class="kw">let</span> postid <span class="ot">=</span> <span class="fu">read</span> <span class="op">$</span> <span class="fu">takeWhile</span> (<span class="op">/=</span><span class="ch">&#39;_&#39;</span>) postid&#39;</span>
+<span id="cb7-14"><a href="#cb7-14" aria-hidden="true" tabindex="-1"></a>        posttime <span class="ot">=</span> <span class="fu">read</span><span class="ot"> time_string ::</span> <span class="dt">UTCTime</span></span>
+<span id="cb7-15"><a href="#cb7-15" aria-hidden="true" tabindex="-1"></a>    <span class="fu">return</span> <span class="dt">Post</span>{<span class="op">..</span>} </span></code></pre></div>
+<p>To tidy things up we can change the response type of our <code>req</code> request to a <code>jsonResponse</code> and actually parse the JSON immediately, like so:</p>
+<div class="sourceCode" id="cb8"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="ot">postFromFB ::</span> <span class="dt">Token</span> <span class="ot">-&gt;</span> <span class="dt">PostID</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> <span class="dt">Post</span></span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a>postFromFB token p <span class="ot">=</span> <span class="kw">do</span> </span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a>    r <span class="ot">&lt;-</span> (req </span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true" tabindex="-1"></a>      <span class="dt">GET</span> </span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true" tabindex="-1"></a>      (https <span class="st">&quot;graph.facebook.com&quot;</span> <span class="op">/:</span> <span class="st">&quot;v2.10&quot;</span> <span class="op">/:</span> (T.pack p)) </span>
+<span id="cb8-6"><a href="#cb8-6" aria-hidden="true" tabindex="-1"></a>      <span class="dt">NoReqBody</span> </span>
+<span id="cb8-7"><a href="#cb8-7" aria-hidden="true" tabindex="-1"></a>      jsonResponse </span>
+<span id="cb8-8"><a href="#cb8-8" aria-hidden="true" tabindex="-1"></a>      options token)</span>
+<span id="cb8-9"><a href="#cb8-9" aria-hidden="true" tabindex="-1"></a>  <span class="fu">return</span> (responseBody<span class="ot"> r ::</span> <span class="dt">Post</span>)</span></code></pre></div>
+<p>Or can we...</p>
+<h2>Paging</h2>
+<p>The Facebook Graph API, by default, only returns the most recent 25 things of each type. That is, when making a request on a post with 26 comments and 26 reactions, only the first 25 reactions will appear in the <code>reactions.data</code> field, and same for the comments. This limit can be increased to 100, but that's just kicking the can down the road. Given that many posts have more that 100 reactions and/or comments, how do we get <em>all</em> of them?</p>
+<p>The answer is in the <code>paging</code> field. This (sometimes, if there are any extra things) contains a <code>next</code> field that you can put into your query string to get the next n things. This means we need to rethink our <code>postFromFB</code> function, because the response body of an API call <em>is not a <code>Post</code></em>, but some top level <code>Post</code> information (the message and time), the first 25 <code>Comment</code>s and <em>possibly a pointer to some more <code>Comments</code></em>, and the first 25 <code>Reaction</code>s and <em>possibly a pointer to some more <code>Reaction</code>s</em>.</p>
+<p>We can abstract this pattern of "Some things, and possibly instructions on how to get more things" as a new data type</p>
+<div class="sourceCode" id="cb9"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Paging</span> a <span class="ot">=</span> <span class="dt">Paging</span> {<span class="ot">content ::</span> [a],<span class="ot"> next ::</span> <span class="dt">Maybe</span> <span class="dt">String</span>}</span></code></pre></div>
+<p>and class,</p>
+<div class="sourceCode" id="cb10"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> <span class="dt">CanPage</span> a <span class="kw">where</span><span class="ot"> getNext ::</span> <span class="dt">Token</span> <span class="ot">-&gt;</span> <span class="dt">PostID</span> <span class="ot">-&gt;</span> <span class="dt">Paging</span> a <span class="ot">-&gt;</span> <span class="dt">IO</span> (<span class="dt">Maybe</span> (<span class="dt">Paging</span> a))</span></code></pre></div>
+<p>First we make an instance of <code>FromJSON (Paging a)</code> whenever we have an instance of <code>FromJSON a</code>:</p>
+<div class="sourceCode" id="cb11"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a><span class="kw">instance</span> (<span class="dt">FromJSON</span> a) <span class="ot">=&gt;</span> <span class="dt">FromJSON</span> (<span class="dt">Paging</span> a) <span class="kw">where</span> </span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a>  parseJSON <span class="ot">=</span> withObject <span class="st">&quot;&quot;</span> <span class="op">$</span> \o<span class="ot">-&gt;</span> <span class="kw">do</span></span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true" tabindex="-1"></a>    adata <span class="ot">&lt;-</span> o<span class="op">.:</span> <span class="st">&quot;data&quot;</span></span>
+<span id="cb11-4"><a href="#cb11-4" aria-hidden="true" tabindex="-1"></a>    content <span class="ot">&lt;-</span> parseJSON (<span class="dt">Array</span> adata)</span>
+<span id="cb11-5"><a href="#cb11-5" aria-hidden="true" tabindex="-1"></a>    pg <span class="ot">&lt;-</span> o <span class="op">.:?</span> <span class="st">&quot;paging&quot;</span> <span class="op">.!=</span> (H.empty<span class="ot"> ::</span> <span class="dt">H.HashMap</span> <span class="dt">T.Text</span> <span class="dt">Value</span>)</span>
+<span id="cb11-6"><a href="#cb11-6" aria-hidden="true" tabindex="-1"></a>    cr <span class="ot">&lt;-</span> pg <span class="op">.:?</span> <span class="st">&quot;cursors&quot;</span> <span class="op">.!=</span> (H.empty<span class="ot"> ::</span> <span class="dt">H.HashMap</span> <span class="dt">T.Text</span> <span class="dt">Value</span>)</span>
+<span id="cb11-7"><a href="#cb11-7" aria-hidden="true" tabindex="-1"></a>    next <span class="ot">&lt;-</span> cr <span class="op">.:?</span> <span class="st">&quot;after&quot;</span></span>
+<span id="cb11-8"><a href="#cb11-8" aria-hidden="true" tabindex="-1"></a>    <span class="fu">return</span> <span class="dt">Paging</span>{<span class="op">..</span>}</span></code></pre></div>
+<p>Then we make a type for initial responses:</p>
+<div class="sourceCode" id="cb12"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a><span class="co">--(id, message, time, comments, reactions)</span></span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">PostResponse</span> <span class="ot">=</span> <span class="dt">PostResponse</span> (<span class="dt">PostID</span>, <span class="dt">String</span>, <span class="dt">UTCTime</span>, <span class="dt">Paging</span> <span class="dt">Comment</span>, <span class="dt">Paging</span> <span class="dt">Reaction</span>)</span></code></pre></div>
+<p>and an instance of <code>FromJSON</code></p>
+<div class="sourceCode" id="cb13"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="kw">instance</span> <span class="dt">FromJSON</span> <span class="dt">PostResponse</span> <span class="kw">where</span></span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a>  parseJSON <span class="ot">=</span> withObject <span class="st">&quot;response&quot;</span> <span class="op">$</span> \o <span class="ot">-&gt;</span> <span class="kw">do</span></span>
+<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a>    r <span class="ot">&lt;-</span> o <span class="op">.:?</span> <span class="st">&quot;reactions&quot;</span> <span class="op">.!=</span> (H.empty<span class="ot"> ::</span> <span class="dt">H.HashMap</span> <span class="dt">T.Text</span> <span class="dt">Value</span>)</span>
+<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a>    rs <span class="ot">&lt;-</span> parseJSON (<span class="dt">Object</span> r)</span>
+<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a>    c <span class="ot">&lt;-</span> o <span class="op">.:?</span> <span class="st">&quot;comments&quot;</span> <span class="op">.!=</span> (H.empty<span class="ot"> ::</span> <span class="dt">H.HashMap</span> <span class="dt">T.Text</span> <span class="dt">Value</span>)</span>
+<span id="cb13-6"><a href="#cb13-6" aria-hidden="true" tabindex="-1"></a>    cs <span class="ot">&lt;-</span> parseJSON (<span class="dt">Object</span> c)  </span>
+<span id="cb13-7"><a href="#cb13-7" aria-hidden="true" tabindex="-1"></a>    message <span class="ot">&lt;-</span> o <span class="op">.:</span> <span class="st">&quot;message&quot;</span></span>
+<span id="cb13-8"><a href="#cb13-8" aria-hidden="true" tabindex="-1"></a>    time_string <span class="ot">&lt;-</span> o<span class="op">.:</span> <span class="st">&quot;created_time&quot;</span></span>
+<span id="cb13-9"><a href="#cb13-9" aria-hidden="true" tabindex="-1"></a>    ids <span class="ot">&lt;-</span> o<span class="op">.:</span> <span class="st">&quot;id&quot;</span></span>
+<span id="cb13-10"><a href="#cb13-10" aria-hidden="true" tabindex="-1"></a>    <span class="fu">return</span> <span class="op">$</span>  <span class="dt">PostResponse</span> (ids, message, time_string, cs, rs)</span></code></pre></div>
+<p>So the function <code>postFromFB</code> now has signature <code>Token -&gt; PostID -&gt; PostResponse</code>. We just need a way to elaborate a <code>PostResponse</code> into a <code>Post</code>.</p>
+<p>We define some helper methods to make making API requests simpler.</p>
+<div class="sourceCode" id="cb14"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a><span class="ot">jsonRequest ::</span>  (<span class="dt">FromJSON</span> c) <span class="ot">=&gt;</span> <span class="dt">Url</span> scheme <span class="ot">-&gt;</span> <span class="dt">Option</span> scheme <span class="ot">-&gt;</span>  <span class="dt">IO</span> ( c)</span>
+<span id="cb14-2"><a href="#cb14-2" aria-hidden="true" tabindex="-1"></a>jsonRequest url opts<span class="ot">=</span>  </span>
+<span id="cb14-3"><a href="#cb14-3" aria-hidden="true" tabindex="-1"></a>    (req <span class="dt">GET</span> </span>
+<span id="cb14-4"><a href="#cb14-4" aria-hidden="true" tabindex="-1"></a>    url</span>
+<span id="cb14-5"><a href="#cb14-5" aria-hidden="true" tabindex="-1"></a>    <span class="dt">NoReqBody</span> </span>
+<span id="cb14-6"><a href="#cb14-6" aria-hidden="true" tabindex="-1"></a>    jsonResponse</span>
+<span id="cb14-7"><a href="#cb14-7" aria-hidden="true" tabindex="-1"></a>    opts ) <span class="op">&gt;&gt;=</span> (\r <span class="ot">-&gt;</span>   <span class="fu">return</span> (responseBody r )  )</span>
+<span id="cb14-8"><a href="#cb14-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb14-9"><a href="#cb14-9" aria-hidden="true" tabindex="-1"></a><span class="ot">options&#39;::</span> <span class="dt">String</span> <span class="ot">-&gt;</span> <span class="dt">Token</span> <span class="ot">-&gt;</span> <span class="dt">String</span> <span class="ot">-&gt;</span> <span class="dt">Option</span> scheme</span>
+<span id="cb14-10"><a href="#cb14-10" aria-hidden="true" tabindex="-1"></a>options&#39; what token next <span class="ot">=</span> <span class="fu">mconcat</span> [<span class="st">&quot;fields&quot;</span> <span class="op">=:</span> (<span class="st">&quot;message,message_tags,from,created_time,type,id,name&quot;</span><span class="ot">::</span><span class="dt">String</span>),<span class="st">&quot;access_token&quot;</span> <span class="op">=:</span> (<span class="ot">token ::</span> <span class="dt">String</span>),</span>
+<span id="cb14-11"><a href="#cb14-11" aria-hidden="true" tabindex="-1"></a>              <span class="st">&quot;limit&quot;</span> <span class="op">=:</span> (<span class="st">&quot;100&quot;</span><span class="ot"> ::</span> <span class="dt">String</span>),</span>
+<span id="cb14-12"><a href="#cb14-12" aria-hidden="true" tabindex="-1"></a>              <span class="st">&quot;after&quot;</span> <span class="op">=:</span> (<span class="ot">next ::</span> <span class="dt">String</span>)] </span>
+<span id="cb14-13"><a href="#cb14-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb14-14"><a href="#cb14-14" aria-hidden="true" tabindex="-1"></a><span class="ot">makePostURL ::</span> <span class="dt">PostID</span> <span class="ot">-&gt;</span> <span class="dt">String</span> <span class="ot">-&gt;</span> <span class="dt">Url</span> <span class="dt">&#39;Https</span></span>
+<span id="cb14-15"><a href="#cb14-15" aria-hidden="true" tabindex="-1"></a>makePostURL p what <span class="ot">=</span> (https <span class="st">&quot;graph.facebook.com&quot;</span> <span class="op">/:</span> <span class="st">&quot;v2.10&quot;</span> <span class="op">/:</span> (T.pack p) <span class="op">/:</span> (T.pack what) )  </span>
+<span id="cb14-16"><a href="#cb14-16" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb14-17"><a href="#cb14-17" aria-hidden="true" tabindex="-1"></a><span class="ot">pagingFromFB ::</span> (<span class="dt">FromJSON</span> c)<span class="ot">=&gt;</span> <span class="dt">Token</span> <span class="ot">-&gt;</span> <span class="dt">String</span> <span class="ot">-&gt;</span> <span class="dt">String</span> <span class="ot">-&gt;</span>  <span class="dt">PostID</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> (<span class="dt">Paging</span> c)</span>
+<span id="cb14-18"><a href="#cb14-18" aria-hidden="true" tabindex="-1"></a>pagingFromFB token what n  parent <span class="ot">=</span> <span class="kw">do</span></span>
+<span id="cb14-19"><a href="#cb14-19" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> url <span class="ot">=</span> makePostURL parent what</span>
+<span id="cb14-20"><a href="#cb14-20" aria-hidden="true" tabindex="-1"></a>      opts <span class="ot">=</span> options&#39; what token n</span>
+<span id="cb14-21"><a href="#cb14-21" aria-hidden="true" tabindex="-1"></a>  jsonRequest url opts</span></code></pre></div>
+<p>Now we need to deal with paging comments and reactions.</p>
+<div class="sourceCode" id="cb15"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a><span class="ot">nextPaging ::</span>  (<span class="dt">FromJSON</span> a) <span class="ot">=&gt;</span> <span class="dt">Token</span> <span class="ot">-&gt;</span> <span class="dt">String</span> <span class="ot">-&gt;</span> <span class="dt">PostID</span> <span class="ot">-&gt;</span> <span class="dt">Paging</span> a <span class="ot">-&gt;</span><span class="dt">IO</span> (<span class="dt">Maybe</span> (<span class="dt">Paging</span> a))</span>
+<span id="cb15-2"><a href="#cb15-2" aria-hidden="true" tabindex="-1"></a>nextPaging token what postid (<span class="dt">Paging</span>{<span class="op">..</span>}) <span class="ot">=</span> <span class="kw">case</span> next <span class="kw">of</span> </span>
+<span id="cb15-3"><a href="#cb15-3" aria-hidden="true" tabindex="-1"></a>    <span class="dt">Nothing</span> <span class="ot">-&gt;</span> <span class="fu">return</span> <span class="dt">Nothing</span></span>
+<span id="cb15-4"><a href="#cb15-4" aria-hidden="true" tabindex="-1"></a>    <span class="dt">Just</span> n <span class="ot">-&gt;</span> <span class="kw">do</span></span>
+<span id="cb15-5"><a href="#cb15-5" aria-hidden="true" tabindex="-1"></a>      p <span class="ot">&lt;-</span> pagingFromFB token what n postid</span>
+<span id="cb15-6"><a href="#cb15-6" aria-hidden="true" tabindex="-1"></a>      <span class="fu">return</span> <span class="op">$</span> <span class="dt">Just</span> p</span>
+<span id="cb15-7"><a href="#cb15-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb15-8"><a href="#cb15-8" aria-hidden="true" tabindex="-1"></a><span class="kw">instance</span> <span class="dt">CanPage</span> <span class="dt">Comment</span> <span class="kw">where</span></span>
+<span id="cb15-9"><a href="#cb15-9" aria-hidden="true" tabindex="-1"></a>  getNext token  <span class="ot">=</span> nextPaging token <span class="st">&quot;comments&quot;</span> </span>
+<span id="cb15-10"><a href="#cb15-10" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb15-11"><a href="#cb15-11" aria-hidden="true" tabindex="-1"></a><span class="kw">instance</span> <span class="dt">CanPage</span> <span class="dt">Reaction</span> <span class="kw">where</span></span>
+<span id="cb15-12"><a href="#cb15-12" aria-hidden="true" tabindex="-1"></a>  getNext token <span class="ot">=</span> nextPaging token <span class="st">&quot;reactions&quot;</span></span></code></pre></div>
+<p>So given a <code>Paging a</code> we can use <code>nextPaging</code> to get the next <code>Paging a</code>, if it exists. We just need some function to repeat this until there are no more to get, and collect all the <code>a</code>s along the way.</p>
+<div class="sourceCode" id="cb16"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a><span class="ot">elab ::</span> (<span class="dt">CanPage</span> c) <span class="ot">=&gt;</span>  <span class="dt">Token</span> <span class="ot">-&gt;</span> <span class="dt">PostID</span> <span class="ot">-&gt;</span> <span class="dt">Paging</span> c <span class="ot">-&gt;</span> <span class="dt">IO</span> [c]</span>
+<span id="cb16-2"><a href="#cb16-2" aria-hidden="true" tabindex="-1"></a>elab token postid (p<span class="op">@</span><span class="dt">Paging</span>{<span class="op">..</span>}) <span class="ot">=</span> <span class="kw">case</span> next <span class="kw">of</span></span>
+<span id="cb16-3"><a href="#cb16-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">Nothing</span> <span class="ot">-&gt;</span> <span class="fu">return</span> content</span>
+<span id="cb16-4"><a href="#cb16-4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">Just</span> n <span class="ot">-&gt;</span> <span class="kw">do</span></span>
+<span id="cb16-5"><a href="#cb16-5" aria-hidden="true" tabindex="-1"></a>    p&#39; <span class="ot">&lt;-</span> getNext token postid p</span>
+<span id="cb16-6"><a href="#cb16-6" aria-hidden="true" tabindex="-1"></a>    <span class="kw">case</span> p&#39; <span class="kw">of</span></span>
+<span id="cb16-7"><a href="#cb16-7" aria-hidden="true" tabindex="-1"></a>      <span class="dt">Nothing</span> <span class="ot">-&gt;</span> <span class="fu">return</span> content</span>
+<span id="cb16-8"><a href="#cb16-8" aria-hidden="true" tabindex="-1"></a>      <span class="dt">Just</span> (p&#39;&#39;) <span class="ot">-&gt;</span> <span class="kw">do</span></span>
+<span id="cb16-9"><a href="#cb16-9" aria-hidden="true" tabindex="-1"></a>        cs <span class="ot">&lt;-</span> elab token postid p&#39;&#39;</span>
+<span id="cb16-10"><a href="#cb16-10" aria-hidden="true" tabindex="-1"></a>        <span class="fu">return</span> <span class="op">$</span> content<span class="op">++</span>cs</span></code></pre></div>
+<p>We finish up here by defining a function to make a <code>Post</code> from a <code>PostResponse</code> (and a <code>Token</code>).</p>
+<div class="sourceCode" id="cb17"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a><span class="ot">makePost ::</span> <span class="dt">Token</span> <span class="ot">-&gt;</span>  <span class="dt">PostResponse</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> <span class="dt">Post</span></span>
+<span id="cb17-2"><a href="#cb17-2" aria-hidden="true" tabindex="-1"></a>makePost token (<span class="dt">PostResponse</span>(ids,m,t,pcs,prs)) <span class="ot">=</span> <span class="kw">do</span></span>
+<span id="cb17-3"><a href="#cb17-3" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> postmessage <span class="ot">=</span> m</span>
+<span id="cb17-4"><a href="#cb17-4" aria-hidden="true" tabindex="-1"></a>      postID <span class="ot">=</span> ids </span>
+<span id="cb17-5"><a href="#cb17-5" aria-hidden="true" tabindex="-1"></a>      postnum <span class="ot">=</span> <span class="dt">Nothing</span></span>
+<span id="cb17-6"><a href="#cb17-6" aria-hidden="true" tabindex="-1"></a>      posttime <span class="ot">=</span> t </span>
+<span id="cb17-7"><a href="#cb17-7" aria-hidden="true" tabindex="-1"></a>      postrefs <span class="ot">=</span> [] </span>
+<span id="cb17-8"><a href="#cb17-8" aria-hidden="true" tabindex="-1"></a>  postcomments <span class="ot">&lt;-</span> elab token postID pcs</span>
+<span id="cb17-9"><a href="#cb17-9" aria-hidden="true" tabindex="-1"></a>  postreactions <span class="ot">&lt;-</span> elab token postID prs</span>
+<span id="cb17-10"><a href="#cb17-10" aria-hidden="true" tabindex="-1"></a>  <span class="fu">return</span> <span class="dt">Post</span>{<span class="op">..</span>}</span>
+<span id="cb17-11"><a href="#cb17-11" aria-hidden="true" tabindex="-1"></a>     </span>
+<span id="cb17-12"><a href="#cb17-12" aria-hidden="true" tabindex="-1"></a><span class="ot">makePostFromFB ::</span> <span class="dt">Token</span> <span class="ot">-&gt;</span> <span class="dt">PostID</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> <span class="dt">Post</span>   </span>
+<span id="cb17-13"><a href="#cb17-13" aria-hidden="true" tabindex="-1"></a>makePostFromFB token p  <span class="ot">=</span> postFromFB token p <span class="op">&gt;&gt;=</span> makePost token</span></code></pre></div>
+<h2>Cleaning up</h2>
+<p>One thing to notice is that nearly every function we've defined takes a <code>Token</code> and just passes it to another function. We can hide this by defining a new monad type <code>FB a = Token -&gt; IO a</code>, so that a value of type <code>FB a</code> represents a computation that, given a <code>Token</code>, makes some calls to the Facebook API and returns an <code>a</code>.</p>
+<div class="sourceCode" id="cb18"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true" tabindex="-1"></a><span class="kw">newtype</span> <span class="dt">FB</span> a <span class="ot">=</span> <span class="dt">FB</span> (<span class="dt">Token</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> a)</span>
+<span id="cb18-2"><a href="#cb18-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-3"><a href="#cb18-3" aria-hidden="true" tabindex="-1"></a><span class="kw">instance</span> <span class="dt">Monad</span> <span class="dt">FB</span> <span class="kw">where</span></span>
+<span id="cb18-4"><a href="#cb18-4" aria-hidden="true" tabindex="-1"></a>  <span class="fu">return</span>  x  <span class="ot">=</span> <span class="dt">FB</span> (\t <span class="ot">-&gt;</span> <span class="fu">return</span> x)</span>
+<span id="cb18-5"><a href="#cb18-5" aria-hidden="true" tabindex="-1"></a>  <span class="dt">FB</span> xm <span class="op">&gt;&gt;=</span> f  <span class="ot">=</span> <span class="dt">FB</span> (\t <span class="ot">-&gt;</span> xm t <span class="op">&gt;&gt;=</span> (\a <span class="ot">-&gt;</span>  <span class="kw">let</span> <span class="dt">FB</span> ym <span class="ot">=</span> f a <span class="kw">in</span> ym t) )</span>
+<span id="cb18-6"><a href="#cb18-6" aria-hidden="true" tabindex="-1"></a><span class="kw">instance</span> <span class="dt">Functor</span> <span class="dt">FB</span> <span class="kw">where</span></span>
+<span id="cb18-7"><a href="#cb18-7" aria-hidden="true" tabindex="-1"></a>  <span class="fu">fmap</span> f (<span class="dt">FB</span> xm) <span class="ot">=</span> <span class="dt">FB</span> (\t <span class="ot">-&gt;</span> xm t <span class="op">&gt;&gt;=</span> (\a <span class="ot">-&gt;</span> <span class="fu">return</span> <span class="op">$</span> f a))</span>
+<span id="cb18-8"><a href="#cb18-8" aria-hidden="true" tabindex="-1"></a><span class="kw">instance</span> <span class="dt">Applicative</span> <span class="dt">FB</span> <span class="kw">where</span></span>
+<span id="cb18-9"><a href="#cb18-9" aria-hidden="true" tabindex="-1"></a>  <span class="fu">pure</span> <span class="ot">=</span> <span class="fu">return</span></span>
+<span id="cb18-10"><a href="#cb18-10" aria-hidden="true" tabindex="-1"></a>  (<span class="dt">FB</span> xmm) <span class="op">&lt;*&gt;</span> (<span class="dt">FB</span> ym) <span class="ot">=</span> <span class="dt">FB</span> (\t <span class="ot">-&gt;</span> ym t <span class="op">&gt;&gt;=</span> (\a <span class="ot">-&gt;</span> xmm t <span class="op">&gt;&gt;=</span> (\f <span class="ot">-&gt;</span> <span class="fu">return</span>  <span class="op">$</span> f a)))</span>
+<span id="cb18-11"><a href="#cb18-11" aria-hidden="true" tabindex="-1"></a><span class="kw">instance</span> <span class="dt">MonadIO</span> <span class="dt">FB</span> <span class="kw">where</span></span>
+<span id="cb18-12"><a href="#cb18-12" aria-hidden="true" tabindex="-1"></a>  liftIO xm <span class="ot">=</span> <span class="dt">FB</span>( \t <span class="ot">-&gt;</span> xm <span class="op">&gt;&gt;=</span> \x <span class="ot">-&gt;</span> <span class="fu">return</span> x)</span>
+<span id="cb18-13"><a href="#cb18-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-14"><a href="#cb18-14" aria-hidden="true" tabindex="-1"></a><span class="ot">runFB ::</span>  <span class="dt">FB</span> a <span class="ot">-&gt;</span> <span class="dt">Token</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> a</span>
+<span id="cb18-15"><a href="#cb18-15" aria-hidden="true" tabindex="-1"></a>runFB (<span class="dt">FB</span> xm) token <span class="ot">=</span> xm token </span></code></pre></div>
+<p>Then we can change most of our functions to return <code>FB a</code>, and in <code>main</code> call them like:</p>
+<div class="sourceCode" id="cb19"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a><span class="ot">main ::</span> <span class="dt">IO</span> ()</span>
+<span id="cb19-2"><a href="#cb19-2" aria-hidden="true" tabindex="-1"></a>main <span class="ot">=</span> <span class="kw">do</span></span>
+<span id="cb19-3"><a href="#cb19-3" aria-hidden="true" tabindex="-1"></a>  token <span class="ot">&lt;-</span> getToken</span>
+<span id="cb19-4"><a href="#cb19-4" aria-hidden="true" tabindex="-1"></a>  postid <span class="ot">&lt;-</span> getID</span>
+<span id="cb19-5"><a href="#cb19-5" aria-hidden="true" tabindex="-1"></a>  post <span class="ot">&lt;-</span> runFB (makePostFromFB postid) token</span>
+<span id="cb19-6"><a href="#cb19-6" aria-hidden="true" tabindex="-1"></a>  <span class="fu">print</span> post</span></code></pre></div>
+<p>(where <code>getToken :: IO Token, getID :: IO PostID, makePostFromFB :: PostID -&gt; FB Post</code>.)</p>
+<h2>Database</h2>
+<p>Now that we can get any post we want, we need some place to put them all. A MYSQL database will do. We'll use the following schema, with all the obvious foreign key constraints.</p>
+<table>
+<thead>
+<tr class="header">
+<th align="left">Table</th>
+<th align="left">Field</th>
+<th align="left">Type</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">comments</td>
+<td align="left">id_comment</td>
+<td align="left">bigint</td>
+</tr>
+<tr class="even">
+<td align="left">comments</td>
+<td align="left">id_parent</td>
+<td align="left">bigint</td>
+</tr>
+<tr class="odd">
+<td align="left">comments</td>
+<td align="left">id_author</td>
+<td align="left">bigint</td>
+</tr>
+<tr class="even">
+<td align="left">comments</td>
+<td align="left">message</td>
+<td align="left">text</td>
+</tr>
+<tr class="odd">
+<td align="left">comments</td>
+<td align="left">time t</td>
+<td align="left">imestamp</td>
+</tr>
+<tr class="even">
+<td align="left">posts</td>
+<td align="left">id_post</td>
+<td align="left">bigint</td>
+</tr>
+<tr class="odd">
+<td align="left">posts</td>
+<td align="left">message</td>
+<td align="left">text</td>
+</tr>
+<tr class="even">
+<td align="left">posts</td>
+<td align="left">feudnum</td>
+<td align="left">int</td>
+</tr>
+<tr class="odd">
+<td align="left">posts</td>
+<td align="left">time t</td>
+<td align="left">imestamp</td>
+</tr>
+<tr class="even">
+<td align="left">reactions</td>
+<td align="left">type v</td>
+<td align="left">archar</td>
+</tr>
+<tr class="odd">
+<td align="left">reactions</td>
+<td align="left">id_author</td>
+<td align="left">bigint</td>
+</tr>
+<tr class="even">
+<td align="left">reactions</td>
+<td align="left">id_post</td>
+<td align="left">bigint</td>
+</tr>
+<tr class="odd">
+<td align="left">refs id</td>
+<td align="left">_src big</td>
+<td align="left">int</td>
+</tr>
+<tr class="even">
+<td align="left">refs nu</td>
+<td align="left">m_dest int</td>
+<td align="left"></td>
+</tr>
+<tr class="odd">
+<td align="left">tags i</td>
+<td align="left">d_comment b</td>
+<td align="left">igint</td>
+</tr>
+<tr class="even">
+<td align="left">tags</td>
+<td align="left">tagged_user</td>
+<td align="left">bigint</td>
+</tr>
+<tr class="odd">
+<td align="left">users</td>
+<td align="left">id_user</td>
+<td align="left">bigint</td>
+</tr>
+<tr class="even">
+<td align="left">users</td>
+<td align="left">name t</td>
+<td align="left">inytext</td>
+</tr>
+</tbody>
+</table>
+<p>We're going to use the <a href="https://hackage.haskell.org/package/mysql-simple-0.4.4/docs/Database-MySQL-Simple.html">mysql-simple</a> library for putting posts in the database.</p>
+<p>The idea here is to construct query templates like <code>myQuery = "INSERT INTO table(v1,v2) VALUES(?,?)"</code>, then execute them by calling <code>execute connection myQuery (x1,x2)</code>.</p>
+<p>Mostly we're just going to be <code>INSERT</code>ing rows into a table. Sometimes we'll want to <code>UPDATE</code>, like if the content of a post or comment changes.</p>
+<p>So, to insert the data from a comment we could write a function like:</p>
+<div class="sourceCode" id="cb20"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true" tabindex="-1"></a><span class="ot">insertComment ::</span> <span class="dt">Connection</span> <span class="ot">-&gt;</span> <span class="dt">Comment</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> ()</span>
+<span id="cb20-2"><a href="#cb20-2" aria-hidden="true" tabindex="-1"></a>insertComment cx <span class="dt">Comment</span>{<span class="op">..</span>} <span class="ot">=</span> <span class="fu">catch</span> </span>
+<span id="cb20-3"><a href="#cb20-3" aria-hidden="true" tabindex="-1"></a>  (execute cx <span class="st">&quot;INSERT INTO comments...&quot;</span> <span class="op">...</span> )</span>
+<span id="cb20-4"><a href="#cb20-4" aria-hidden="true" tabindex="-1"></a>  (\e <span class="ot">-&gt;</span> <span class="kw">let</span> err <span class="ot">=</span> <span class="fu">show</span> (<span class="ot">e ::</span> <span class="dt">SomeException</span>) <span class="kw">in</span> (<span class="fu">print</span> err) <span class="op">&gt;&gt;</span> <span class="fu">catch</span> </span>
+<span id="cb20-5"><a href="#cb20-5" aria-hidden="true" tabindex="-1"></a>    (execute cx <span class="st">&quot;UPDATE comments...&quot;</span> <span class="op">...</span>)</span>
+<span id="cb20-6"><a href="#cb20-6" aria-hidden="true" tabindex="-1"></a>    (\e&#39; <span class="ot">-&gt;</span> <span class="kw">let</span> err&#39; <span class="ot">=</span> <span class="fu">show</span> (<span class="ot">e&#39; ::</span> <span class="dt">SomeException</span>) <span class="kw">in</span> <span class="fu">print</span> err&#39;))</span></code></pre></div>
+<p>This will try inserting, and if that fails print the exception and try updating, and if <em>that</em> fails too, print the exception and exit gracefully. It works, but it's not ideal.</p>
+<p>There's a lot of code reuse inside <code>insertComment</code>, and given that we'll need something similar for inserting <code>Post</code>s, <code>Reaction</code>s, etc, we should try and pull out all the boilerplate, because fundamentally, there's not a lot of difference between putting a <code>Post</code> or a <code>Comment</code> into the database, the only thing that really changes is what table it goes in, and what query you use.</p>
+<p>So let's start by keeping track of all the tables we'll be accessing, and let's make an appropriate pair of <code>INSERT</code> and <code>UPDATE</code> queries for each of them.</p>
+<div class="sourceCode" id="cb21"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb21-1"><a href="#cb21-1" aria-hidden="true" tabindex="-1"></a><span class="kw">data</span> <span class="dt">Table</span> <span class="ot">=</span> <span class="dt">Po</span> <span class="op">|</span> <span class="dt">Co</span> <span class="op">|</span> <span class="dt">Us</span> <span class="op">|</span> <span class="dt">Re</span> <span class="op">|</span> <span class="dt">Reac</span> <span class="op">|</span> <span class="dt">Ta</span> <span class="kw">deriving</span> <span class="dt">Show</span></span>
+<span id="cb21-2"><a href="#cb21-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb21-3"><a href="#cb21-3" aria-hidden="true" tabindex="-1"></a><span class="ot">queries ::</span> <span class="dt">Table</span> <span class="ot">-&gt;</span> (<span class="dt">Query</span>, <span class="dt">Query</span>)</span>
+<span id="cb21-4"><a href="#cb21-4" aria-hidden="true" tabindex="-1"></a>queries <span class="dt">Po</span> <span class="ot">=</span> (<span class="st">&quot;INSERT INTO posts(id_post, feudnum, message, time) VALUES(?,?,?,?)&quot;</span>, <span class="st">&quot;UPDATE posts SET feudnum = ?, message = ?, time = ? WHERE id_post = ?&quot;</span>)</span>
+<span id="cb21-5"><a href="#cb21-5" aria-hidden="true" tabindex="-1"></a>queries <span class="dt">Co</span> <span class="ot">=</span> (<span class="st">&quot;INSERT INTO comments(id_comment, id_author, message, time, id_parent) VALUES(?,?,?,?,?)&quot;</span>, <span class="st">&quot;UPDATE comments SET id_author=?, message=?, time=?,id_parent=? WHERE id_comment=?&quot;</span>)</span>
+<span id="cb21-6"><a href="#cb21-6" aria-hidden="true" tabindex="-1"></a>queries <span class="dt">Us</span> <span class="ot">=</span> (<span class="st">&quot;INSERT INTO users(id_user,name) VALUES(?,?)&quot;</span>, <span class="st">&quot;UPDATE users SET name=? WHERE id_user=?&quot;</span>)</span>
+<span id="cb21-7"><a href="#cb21-7" aria-hidden="true" tabindex="-1"></a>queries <span class="dt">Re</span> <span class="ot">=</span> (<span class="st">&quot;INSERT INTO refs(id_src,num_dest) VALUES(?,?)&quot;</span>, <span class="st">&quot;&quot;</span>)</span>
+<span id="cb21-8"><a href="#cb21-8" aria-hidden="true" tabindex="-1"></a>queries <span class="dt">Reac</span> <span class="ot">=</span> (<span class="st">&quot;INSERT INTO reactions(id_post, type, id_author) VALUES(?,?,?)&quot;</span>, <span class="st">&quot;&quot;</span>)</span>
+<span id="cb21-9"><a href="#cb21-9" aria-hidden="true" tabindex="-1"></a>queries <span class="dt">Ta</span> <span class="ot">=</span> (<span class="st">&quot;INSERT INTO tags(id_comment, tagged_user) VALUES(?,?)&quot;</span>, <span class="st">&quot;&quot;</span>)</span></code></pre></div>
+<p>Now we can define a helper method to encapsulate the functionality of "try this, and if that fails try this instead":</p>
+<div class="sourceCode" id="cb22"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true" tabindex="-1"></a><span class="ot">tryBoth ::</span> <span class="dt">IO</span> a <span class="ot">-&gt;</span> <span class="dt">IO</span> a <span class="ot">-&gt;</span> (<span class="dt">SomeException</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> a) <span class="ot">-&gt;</span> <span class="dt">IO</span> a</span>
+<span id="cb22-2"><a href="#cb22-2" aria-hidden="true" tabindex="-1"></a>tryBoth a1 a2 handler <span class="ot">=</span> <span class="fu">catch</span> </span>
+<span id="cb22-3"><a href="#cb22-3" aria-hidden="true" tabindex="-1"></a>  a1 </span>
+<span id="cb22-4"><a href="#cb22-4" aria-hidden="true" tabindex="-1"></a>  (\e <span class="ot">-&gt;</span> <span class="kw">let</span> e&#39; <span class="ot">=</span> <span class="fu">show</span> (<span class="ot">e ::</span> <span class="dt">SomeException</span>) <span class="kw">in</span> <span class="fu">catch</span> a2 handler)</span></code></pre></div>
+<p>And now we can make a generic function to put things into the database.</p>
+<div class="sourceCode" id="cb23"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb23-1"><a href="#cb23-1" aria-hidden="true" tabindex="-1"></a><span class="ot">put ::</span> (<span class="dt">QueryParams</span> a, <span class="dt">QueryParams</span> b) <span class="ot">=&gt;</span> <span class="dt">Table</span> <span class="ot">-&gt;</span> a <span class="ot">-&gt;</span> b <span class="ot">-&gt;</span> <span class="dt">Connection</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> ()</span>
+<span id="cb23-2"><a href="#cb23-2" aria-hidden="true" tabindex="-1"></a>put t a b cx <span class="ot">=</span> <span class="kw">let</span> (ins, ups) <span class="ot">=</span> queries t <span class="kw">in</span> tryBoth</span>
+<span id="cb23-3"><a href="#cb23-3" aria-hidden="true" tabindex="-1"></a>  (execute_ cx ins a)</span>
+<span id="cb23-4"><a href="#cb23-4" aria-hidden="true" tabindex="-1"></a>  (execute_ cx ups b)</span>
+<span id="cb23-5"><a href="#cb23-5" aria-hidden="true" tabindex="-1"></a>  (\e <span class="ot">-&gt;</span> <span class="fu">print</span> <span class="op">$</span> <span class="st">&quot;error&quot;</span> <span class="op">++</span> <span class="fu">show</span> t <span class="op">++</span> <span class="st">&quot; &quot;</span> <span class="op">++</span> <span class="fu">show</span> e)</span></code></pre></div>
+<p>Finally, we need a function that actually puts a post into the database. We proceed inductively, starting at the component types and building up to <code>Post</code>.</p>
+<p>There is something to beware of. As we have foreign key constraints in the database, we need to be careful with the order in which we insert things. For example, since the table <code>tags</code> has a column <code>id_comment</code> with a foreign key constraint to the <code>id_comment</code> column in the <code>comments</code> table, <em>we better not try to insert a comment's tags before we insert the comment itself.</em></p>
+<p>Thankfully we can guarantee this quite easily. If <code>xm, ym :: IO ()</code> then in the program</p>
+<div class="sourceCode" id="cb24"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb24-1"><a href="#cb24-1" aria-hidden="true" tabindex="-1"></a><span class="ot">main ::</span> <span class="dt">IO</span> ()</span>
+<span id="cb24-2"><a href="#cb24-2" aria-hidden="true" tabindex="-1"></a>main <span class="ot">=</span> <span class="kw">do</span></span>
+<span id="cb24-3"><a href="#cb24-3" aria-hidden="true" tabindex="-1"></a>  xm</span>
+<span id="cb24-4"><a href="#cb24-4" aria-hidden="true" tabindex="-1"></a>  ym</span></code></pre></div>
+<p>any side effects of <code>xm</code> will take happen before those of <code>ym</code>. Why is that the case? Well, the <code>do</code> notation is just syntactic sugar for</p>
+<div class="sourceCode" id="cb25"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb25-1"><a href="#cb25-1" aria-hidden="true" tabindex="-1"></a>main <span class="ot">=</span> xm <span class="op">&gt;&gt;=</span> <span class="fu">const</span> ym</span></code></pre></div>
+<p>We can <a href="https://wiki.haskell.org/IO_inside">think of the <code>IO</code> monad</a> as a special instance of the <code>State</code> monad, defined as ~~~ {.haskell} type IO a = RealWorld -&gt; (a, RealWorld)</p>
+<p>return :: a -&gt; IO a return x r = (x, r)</p>
+<p>(&gt;&gt;=) :: IO a -&gt; (a -&gt; IO b) -&gt; IO b (xm &gt;&gt;= f) r = let (y, r') = xm r in f y $ r' ~~~</p>
+<p>So our program above simplifies to</p>
+<div class="sourceCode" id="cb26"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb26-1"><a href="#cb26-1" aria-hidden="true" tabindex="-1"></a>main r <span class="ot">=</span> <span class="kw">let</span> (r&#39;, ()) <span class="ot">=</span> xm r <span class="kw">in</span> ym r&#39;</span></code></pre></div>
+<p>And we see that because <code>xm</code> has to be evaulated before <code>ym</code> is.</p>
+<p>Putting a user into the database is simple.</p>
+<div class="sourceCode" id="cb27"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb27-1"><a href="#cb27-1" aria-hidden="true" tabindex="-1"></a><span class="ot">putUser ::</span> <span class="dt">User</span> <span class="ot">-&gt;</span> <span class="dt">Connection</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> ()</span>
+<span id="cb27-2"><a href="#cb27-2" aria-hidden="true" tabindex="-1"></a>putUser (<span class="dt">User</span>{<span class="op">..</span>}) <span class="ot">=</span> put <span class="dt">Us</span> (userid,username) (username,userid) </span></code></pre></div>
+<p>To insert a reaction, we put in the reacting user first and then the reaction itself.</p>
+<div class="sourceCode" id="cb28"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb28-1"><a href="#cb28-1" aria-hidden="true" tabindex="-1"></a><span class="ot">putReaction ::</span> <span class="dt">String</span> <span class="ot">-&gt;</span> <span class="dt">Reaction</span> <span class="ot">-&gt;</span> <span class="dt">Connection</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> ()</span>
+<span id="cb28-2"><a href="#cb28-2" aria-hidden="true" tabindex="-1"></a>putReaction p (<span class="dt">Reaction</span>{<span class="op">..</span>}) cx <span class="ot">=</span> <span class="kw">do</span></span>
+<span id="cb28-3"><a href="#cb28-3" aria-hidden="true" tabindex="-1"></a>  put <span class="dt">Us</span> (userid reactor, username reactor) (username reactor, userid reactor) cx</span>
+<span id="cb28-4"><a href="#cb28-4" aria-hidden="true" tabindex="-1"></a>  put <span class="dt">Reac</span>(p, rtype, userid reactor) () cx</span></code></pre></div>
+<p>Inserting a comment is a little more involved. We insert the author, the comment itself, and then any tagged users.</p>
+<div class="sourceCode" id="cb29"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb29-1"><a href="#cb29-1" aria-hidden="true" tabindex="-1"></a><span class="ot">putComment ::</span>  <span class="dt">Comment</span> <span class="ot">-&gt;</span> <span class="dt">Connection</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> ()</span>
+<span id="cb29-2"><a href="#cb29-2" aria-hidden="true" tabindex="-1"></a>putComment (<span class="dt">Comment</span>{<span class="op">..</span>}) cx <span class="ot">=</span> <span class="kw">do</span></span>
+<span id="cb29-3"><a href="#cb29-3" aria-hidden="true" tabindex="-1"></a>  putUser author cx</span>
+<span id="cb29-4"><a href="#cb29-4" aria-hidden="true" tabindex="-1"></a>  put <span class="dt">Co</span> (commentid, userid author, commentmessage, commenttime, parentid) (userid author, commentmessage, commenttime, parentid, commentid) cx</span>
+<span id="cb29-5"><a href="#cb29-5" aria-hidden="true" tabindex="-1"></a>  <span class="fu">sequence_</span> <span class="op">$</span> <span class="fu">map</span> (\u <span class="ot">-&gt;</span> (putUser u cx) <span class="op">&gt;&gt;</span> (put <span class="dt">Ta</span> (commentid, userid u) () cx)) tags</span></code></pre></div>
+<p>And from here it's straightforward to define how to insert posts.</p>
+<div class="sourceCode" id="cb30"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb30-1"><a href="#cb30-1" aria-hidden="true" tabindex="-1"></a><span class="ot">putPost ::</span> <span class="dt">ConnectInfo</span> <span class="ot">-&gt;</span> <span class="dt">Post</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> ()</span>
+<span id="cb30-2"><a href="#cb30-2" aria-hidden="true" tabindex="-1"></a>putPost ci (<span class="dt">Post</span>{<span class="op">..</span>}) <span class="ot">=</span> <span class="kw">do</span></span>
+<span id="cb30-3"><a href="#cb30-3" aria-hidden="true" tabindex="-1"></a>  cx <span class="ot">&lt;-</span> connect ci</span>
+<span id="cb30-4"><a href="#cb30-4" aria-hidden="true" tabindex="-1"></a>  <span class="fu">sequence_</span> <span class="op">$</span> <span class="fu">map</span> (\c <span class="ot">-&gt;</span> putComment c cx) postcomments</span>
+<span id="cb30-5"><a href="#cb30-5" aria-hidden="true" tabindex="-1"></a>  <span class="fu">sequence_</span> <span class="op">$</span> <span class="fu">map</span> (\r <span class="ot">-&gt;</span> putReaction postid r cx) postreactions</span>
+<span id="cb30-6"><a href="#cb30-6" aria-hidden="true" tabindex="-1"></a>  <span class="fu">sequence_</span> <span class="op">$</span> <span class="fu">map</span> (\r <span class="ot">-&gt;</span> put <span class="dt">Re</span> (postid, r) () cx) postrefs </span>
+<span id="cb30-7"><a href="#cb30-7" aria-hidden="true" tabindex="-1"></a>  put <span class="dt">Po</span> (postid, feudnum, postmessage, posttime) (feudnum, postmessage, posttime, postid) cx</span></code></pre></div>
+<h2>Getting Post IDs</h2>
+<p>So, given a post ID number, we can fetch the data from Facebook and put it into a database. One might wonder, however, how to actually <em>get the post IDs</em> in the first place...</p>
+<p>Well, if you make a Graph API query on a pages <code>feed</code> value, you get a list of the last 25 posts made. Then, in a slight modification from what was discussed above, you can use the paging features to get the 25 previous posts, and the previous 25 posts, and so on. Then, because a page has only a finite amount of posts we can argue by induction that this process terminates, so QED we can get all the post IDs.</p>
+<p>Actually, there's quite a serious issue with the argument above that we haven't taken into account.</p>
+<p>No, not the possibility that in the several hundred milliseconds between making one Graph API call and processing the 25 posts we get and the next one, more than 25 new posts have been submitted.</p>
+<p>Rather, it's the fact that the Graph API is <em>really</em> buggy. Once you page sufficiently far back (roughly 1000 posts, I found), Graph API will start missing posts, and only returning about 10% of them. This is a <a href="https://developers.facebook.com/bugs/1907082866287389/">known issue</a>, and can be fixed by querying the <code>published_posts</code> field instead of <code>feed</code>. Unfortunately, that requires a page access token which I obviously don't have.</p>
+<p>Instead we can exploit the fact that every Oxfeud post starts with <code>#Oxfeud_[n]</code>, for some unique natural number <code>n</code>. So, if you wanted to view the 1000th Oxfeud post, you could simply type <code>#Oxfeud_1000</code> and Facebook's nifty hashtag search feature will display it as the first result.</p>
+<p>From here the solution is simple. Just use Graph API's hashtag search function to search for posts by their Feud Number, and get everything you need from there, because of course Graph API will let you search for any post by hashtag, right? <a href="https://developers.facebook.com/docs/public_feed">Oh..</a>.</p>
+<p>Our old friend <code>wget</code> will have to do. We can just download the search results page for every n between 1 and the current number. Extracting the actual post IDs is a <a href="http://willmatthews.xyz/posts/facebook-hashtag-search/">nice exercise in Regex.</a></p>
+<p>On the other hand, we can actually get the last ~1000 posts using the Graph API. Using the query string</p>
+<p><code>[PAGEID]/?fields=feed{reactions,comments{message,message_tags,from,created_time},message,created_time}&amp;access_token=[TOKEN]</code></p>
+<p>we get a nice response that we can straightforwardly parse into a <code>Paging PostResponse</code> object. If we like, we can call <code>elab</code> on it to fully page it, resulting in about 2000 <code>PostResponse</code>s. Or, we can define a function <code>elab' :: Int -&gt; PageID -&gt; Paging a -&gt; FB [a]</code> so that <code>elab' n</code> pages back n times, and take n to be around 10 or so.</p>
+<h2>Putting it all together</h2>
+<p>A program to read a list of post IDs from a text file and add the corresponding posts to the database could look like this:</p>
+<div class="sourceCode" id="cb31"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb31-1"><a href="#cb31-1" aria-hidden="true" tabindex="-1"></a><span class="ot">main ::</span> <span class="dt">IO</span> ()</span>
+<span id="cb31-2"><a href="#cb31-2" aria-hidden="true" tabindex="-1"></a>main <span class="ot">=</span> <span class="kw">do</span></span>
+<span id="cb31-3"><a href="#cb31-3" aria-hidden="true" tabindex="-1"></a>  postids&#39; <span class="ot">&lt;-</span> <span class="fu">readFile</span> <span class="st">&quot;post_ids.txt&quot;</span></span>
+<span id="cb31-4"><a href="#cb31-4" aria-hidden="true" tabindex="-1"></a>  token <span class="ot">&lt;-</span> <span class="fu">readFile</span> <span class="st">&quot;token.txt&quot;</span></span>
+<span id="cb31-5"><a href="#cb31-5" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> ci <span class="ot">=</span> defaultConnectInfo</span>
+<span id="cb31-6"><a href="#cb31-6" aria-hidden="true" tabindex="-1"></a>      postids <span class="ot">=</span> <span class="fu">lines</span> postids&#39;</span>
+<span id="cb31-7"><a href="#cb31-7" aria-hidden="true" tabindex="-1"></a>  posts <span class="ot">&lt;-</span> runFB (<span class="fu">sequence</span> <span class="op">$</span> <span class="fu">map</span> makePostFromFB postids) token</span>
+<span id="cb31-8"><a href="#cb31-8" aria-hidden="true" tabindex="-1"></a>  <span class="fu">sequence_</span> <span class="op">$</span> <span class="fu">map</span> (putPost ci) posts </span></code></pre></div>
+<p>We can also relax the type signature of, and slightly modify the function <code>pagingFromFB</code> to</p>
+<div class="sourceCode" id="cb32"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb32-1"><a href="#cb32-1" aria-hidden="true" tabindex="-1"></a><span class="ot">jsonFromFB ::</span> (<span class="dt">FromJSON</span> c) <span class="ot">=&gt;</span> <span class="dt">PageID</span> <span class="ot">-&gt;</span> <span class="dt">FB</span> c</span></code></pre></div>
+<p>(where <code>PageID</code> is just a synonym for <code>String</code>) so that it uses the query string above, and hence returns a <code>FB (Paging PostResponse)</code>.</p>
+<p>Then a program to update the last 1000 posts might look like:</p>
+<div class="sourceCode" id="cb33"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb33-1"><a href="#cb33-1" aria-hidden="true" tabindex="-1"></a><span class="ot">main ::</span> <span class="dt">IO</span> ()</span>
+<span id="cb33-2"><a href="#cb33-2" aria-hidden="true" tabindex="-1"></a>main <span class="ot">=</span> <span class="kw">do</span></span>
+<span id="cb33-3"><a href="#cb33-3" aria-hidden="true" tabindex="-1"></a>  token <span class="ot">&lt;-</span> <span class="fu">readFile</span> <span class="st">&quot;token.txt&quot;</span></span>
+<span id="cb33-4"><a href="#cb33-4" aria-hidden="true" tabindex="-1"></a>  <span class="kw">let</span> ci <span class="ot">=</span> defaultConnectInfo</span>
+<span id="cb33-5"><a href="#cb33-5" aria-hidden="true" tabindex="-1"></a>      pageid <span class="ot">=</span> <span class="st">&quot;...&quot;</span></span>
+<span id="cb33-6"><a href="#cb33-6" aria-hidden="true" tabindex="-1"></a>  posts <span class="ot">&lt;-</span> runFB (jsonFromFB pageid <span class="op">&gt;&gt;=</span> elab <span class="dv">10</span> pageid <span class="op">&gt;&gt;=</span> <span class="fu">map</span> makePost) token</span>
+<span id="cb33-7"><a href="#cb33-7" aria-hidden="true" tabindex="-1"></a>  <span class="fu">sequence_</span> <span class="op">$</span> <span class="fu">map</span> (putPost ci) posts</span></code></pre></div>
+<h2>Handling Exceptions</h2>
+<p>The next step is to handle failure. There are three main ways our program can fail:</p>
+<ul>
+<li>We can fail to make a valid <code>Req</code> request</li>
+<li>We can fail to parse a JSON object</li>
+<li>We can fail to connect to/make a query on the database</li>
+</ul>
+<p>Let's start with the <code>FB</code> type. Given that <em>any</em> call to Graph API can potentially fail, it would make sense to redefine it as <code>newtype FB a = FB (Token -&gt; IO (Maybe a))</code>. For readability, we'll prefer to use the standard <a href="https://hackage.haskell.org/package/transformers-0.5.5.0/docs/Control-Monad-Trans-Maybe.html">monad transformer</a>, so define <code>type MFB a = MaybeT FB a</code>.</p>
+<p>It's useful to make a helper function for promoting <code>Maybe a</code>s to <code>MFB a</code>s.</p>
+<div class="sourceCode" id="cb34"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb34-1"><a href="#cb34-1" aria-hidden="true" tabindex="-1"></a><span class="ot">liftMaybe ::</span> <span class="dt">Monad</span> m <span class="ot">=&gt;</span> <span class="dt">Maybe</span> a <span class="ot">-&gt;</span> <span class="dt">MaybeT</span> m a</span>
+<span id="cb34-2"><a href="#cb34-2" aria-hidden="true" tabindex="-1"></a>liftMaybe <span class="ot">=</span> <span class="dt">MaybeT</span> <span class="op">.</span> <span class="fu">return</span> </span></code></pre></div>
+<p>Now we just go around and change every function that returns <code>FB a</code> to return <code>MFB a</code>. This is all pretty standard. One nice thing pops out from the fact that <code>MFB a</code> is an instance of <code>Applicative</code>: we can rewrite <code>elab</code> in a rather more natural way.</p>
+<div class="sourceCode" id="cb35"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span id="cb35-1"><a href="#cb35-1" aria-hidden="true" tabindex="-1"></a><span class="ot">elab ::</span> <span class="dt">CanPage</span> c <span class="ot">=&gt;</span> <span class="dt">PostID</span> <span class="ot">-&gt;</span> <span class="dt">Paging</span> c <span class="ot">-&gt;</span> <span class="dt">MFB</span> [c]</span>
+<span id="cb35-2"><a href="#cb35-2" aria-hidden="true" tabindex="-1"></a>elab postid (p<span class="op">@</span><span class="dt">Paging</span>{<span class="op">..</span>}) <span class="ot">=</span> </span>
+<span id="cb35-3"><a href="#cb35-3" aria-hidden="true" tabindex="-1"></a>  (liftMaybe next <span class="op">&gt;&gt;</span> getNext postid p <span class="op">&gt;&gt;=</span> elab postid <span class="op">&gt;&gt;=</span> <span class="fu">return</span> <span class="op">.</span> (content<span class="op">++</span>)) <span class="op">&lt;|&gt;</span> (<span class="fu">return</span> content)</span></code></pre></div><div class="footer"><a href="http://danielmroz.co.uk">Click here to go back.</a></div></div></div><div class="footer"><p>Copyright &copy; 2022 Daniel Mroz</p></div></div></div></div></body></html>
